@@ -4,18 +4,23 @@
 # authors: @overdodactyl, @earthlng, @9ao9ai9ar
 # version: 5.0
 
+# IMPORTANT! The version string must be on the 5th line of this file
+# and must be of the format "version: MAJOR.MINOR" (spaces are optional).
+# This restriction is set by the function script_version.
+
+# This ShellCheck warning is just noise for those who know what they are doing:
+# "Note that A && B || C is not if-then-else. C may run when A is true."
 # shellcheck disable=SC2015
-# SC2015: Note that A && B || C is not if-then-else. C may run when A is true.
-# This is just noise for those who know what they are doing.
 
-# IMPORTANT! The version string must be on the 5th line of this file,
-# and must be of the format "version: MAJOR.MINOR"
-# (spaces after the colon are optional).
-
-# IMPORTANT! ARKENFOX_UPDATER_NAME must be synced to the name of this file!
-# This is so that we may determine if the script is sourced or not by
-# comparing it to the basename of the canonical path of $0.
-[ -z "$ARKENFOX_UPDATER_NAME" ] && readonly ARKENFOX_UPDATER_NAME='updater.sh'
+# TODO: Check echo/printf usage.
+# TODO: Check all relative paths as arguments to a command begin with ./.
+# TODO: Check globbing is disabled before splitting on unquoted variables if globbing is not needed.
+# TODO: Check all code paths where return on error is necessary and ensure proper exit status is used.
+# TODO: Check these shell-aborting errors are properly handled first in a subshell:
+#  1. Shell language syntax error
+#  2. Special built-in utility error, including redirection error
+#  3. Variable assignment error
+#  4. Expansion error
 
 ###############################################################################
 ####                   === Common utility functions ===                    ####
@@ -57,44 +62,51 @@ EOF
 }
 
 init() {
-    # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_26_03
-    # The pipefail option, included in POSIX.1-2024 (SUSv5),
-    # has long been supported by most major Unix shells,
+    # The pipefail option was added in POSIX.1-2024 (SUSv5),
+    # but has long been supported by most major POSIX-compatible shells,
     # with the notable exceptions of dash and ksh88-based shells.
-    # BEWARE OF PITFALLS: https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
-    # shellcheck disable=SC3040
+    # There are some caveats to switching on this option though:
+    # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
+    # Note that we have to test in a subshell first so that
+    # the non-interactive POSIX sh is not aborted by an error in set,
+    # a special built-in utility:
+    # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
+    # shellcheck disable=SC3040 # In POSIX sh, set option pipefail is undefined.
     (set -o pipefail >/dev/null 2>&1) && set -o pipefail
-    # The --color option of grep is not supported on OpenBSD,
-    # nor is it specified in POSIX.
     # To prevent the accidental insertion of SGR commands in the grep output,
-    # even when not directed at a terminal,
+    # even when not directed at a terminal, and because the --color option
+    # is neither specified in POSIX nor supported by OpenBSD's grep,
     # we explicitly set the following three environment variables:
     export GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se='
     export GREP_COLOR='0' # Obsolete. Use on macOS and some Unix operating systems
     :                     # where the provided grep implementations do not support GREP_COLORS.
     export GREP_OPTIONS=  # Obsolete. Use on systems with GNU grep 2.20 or earlier installed.
     while IFS='=' read -r name code; do
-        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
-        # When reporting the exit status with the special parameter '?',
-        # the shell shall report the full eight bits of exit status available.
-        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
-        # exit [n]: If n is specified, but its value is not between 0 and 255
-        # inclusively, the exit status is undefined.
+        # Trim trailing whitespace characters. Needed for zsh and yash.
+        code=${code%"${code##*[![:space:]]}"} # https://stackoverflow.com/a/3352015
+        # "When reporting the exit status with the special parameter '?',
+        # the shell shall report the full eight bits of exit status available."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
+        # "exit [n]: If n is specified, but its value is not between 0 and 255
+        # inclusively, the exit status is undefined."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
         [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
             printf '%s %s\n' 'Undefined exit status in the definition:' \
                 "$name=$code." >&2
             return 70 # Internal software error.
         }
-        eval "$name=" || continue # $name is readonly.
-        eval readonly "$name='$code'" || {
-            echo 'An unexpected error occurred' \
-                'while evaluating exit status definitions.' >&2
-            return 69 # Service unavailable.
+        (eval readonly "$name=$code" 2>/dev/null) &&
+            eval readonly "$name=$code" || {
+            eval [ "\"\$$name\"" = "$code" ] &&
+                continue # $name is already readonly and set to $code.
+            printf '%s %s\n' "Unable to make the exit status $name readonly." \
+                'Try again in a new shell environment?' >&2
+            return 75 # Temp failure.
         }
     done <<EOF
 $(exit_status_definitions)
 EOF
-    probe_environment
+    probe_environment && post_init
 }
 
 # Copied verbatim from https://unix.stackexchange.com/a/464963.
@@ -132,72 +144,6 @@ read1() { # arg: <variable-name>
     fi
 }
 
-# Copied verbatim from https://stackoverflow.com/a/29835459.
-# shellcheck disable=all
-rreadlink() (# Execute the function in a *subshell* to localize variables and the effect of `cd`.
-
-    target=$1 fname= targetDir= CDPATH=
-
-    # Try to make the execution environment as predictable as possible:
-    # All commands below are invoked via `command`, so we must make sure that `command`
-    # itself is not redefined as an alias or shell function.
-    # (Note that command is too inconsistent across shells, so we don't use it.)
-    # `command` is a *builtin* in bash, dash, ksh, zsh, and some platforms do not even have
-    # an external utility version of it (e.g, Ubuntu).
-    # `command` bypasses aliases and shell functions and also finds builtins
-    # in bash, dash, and ksh. In zsh, option POSIX_BUILTINS must be turned on for that
-    # to happen.
-    {
-        \unalias command
-        \unset -f command
-    } >/dev/null 2>&1
-    [ -n "$ZSH_VERSION" ] && options[POSIX_BUILTINS]=on # make zsh find *builtins* with `command` too.
-
-    while :; do # Resolve potential symlinks until the ultimate target is found.
-        [ -L "$target" ] || [ -e "$target" ] || {
-            command printf '%s\n' "ERROR: '$target' does not exist." >&2
-            return 1
-        }
-        command cd "$(command dirname -- "$target")" # Change to target dir; necessary for correct resolution of target path.
-        fname=$(command basename -- "$target")       # Extract filename.
-        [ "$fname" = '/' ] && fname=''               # !! curiously, `basename /` returns '/'
-        if [ -L "$fname" ]; then
-            # Extract [next] target path, which may be defined
-            # *relative* to the symlink's own directory.
-            # Note: We parse `ls -l` output to find the symlink target
-            #       which is the only POSIX-compliant, albeit somewhat fragile, way.
-            target=$(command ls -l "$fname")
-            target=${target#* -> }
-            continue # Resolve [next] symlink target.
-        fi
-        break # Ultimate target reached.
-    done
-    targetDir=$(command pwd -P) # Get canonical dir. path
-    # Output the ultimate target's canonical path.
-    # Note that we manually resolve paths ending in /. and /.. to make sure we have a normalized path.
-    if [ "$fname" = '.' ]; then
-        command printf '%s\n' "${targetDir%/}"
-    elif [ "$fname" = '..' ]; then
-        # Caveat: something like /var/.. will resolve to /private (assuming /var@ -> /private/var), i.e. the '..' is applied
-        # AFTER canonicalization.
-        command printf '%s\n' "$(command dirname -- "${targetDir}")"
-    else
-        command printf '%s\n' "${targetDir%/}/$fname"
-    fi
-)
-
-preadlink() { # args: FILE...
-    if [ "$#" -le 0 ]; then
-        echo 'preadlink: missing operand' >&2
-        return "$EX_USAGE"
-    else
-        while [ "$#" -gt 0 ]; do
-            rreadlink "$1"
-            shift
-        done
-    fi
-}
-
 print_error() { # args: [ARGUMENT]...
     printf '%s\n' "${RED}ERROR: $*${RESET}" >&2
 }
@@ -219,7 +165,7 @@ print_confirm() { # args: [ARGUMENT]...
 }
 
 probe_terminal() {
-    if tput setaf bold sgr0 >/dev/null 2>&1; then
+    if [ -t 1 ] && [ -t 2 ] && tput setaf bold sgr0 >/dev/null 2>&1; then
         RED=$(tput setaf 1)
         BLUE=$(tput setaf 4)
         BBLUE=$(tput bold setaf 4)
@@ -278,22 +224,91 @@ probe_mktemp() {
 
 probe_readlink() {
     if command realpath -- . >/dev/null 2>&1; then
-        preadlink() { # args: FILE...
-            command realpath -- "$@"
-        }
+        __ARKENFOX_PREADLINK_IMPLEMENTATION='realpath'
     elif command readlink -f -- . >/dev/null 2>&1; then
-        preadlink() { # args: FILE...
-            command readlink -f -- "$@"
-        }
+        __ARKENFOX_PREADLINK_IMPLEMENTATION='readlink'
     elif command greadlink -f -- . >/dev/null 2>&1; then
-        preadlink() { # args: FILE...
-            command greadlink -f -- "$@"
-        }
+        __ARKENFOX_PREADLINK_IMPLEMENTATION='greadlink'
     else
-        print_warning 'Neither realpath nor readlink' \
-            'with support for the -f option are found on your system.' \
-            'Falling back to using the preadlink custom implementation.'
+        print_warning 'Neither realpath nor readlink or greadlink' \
+            'with support for the -f option is found on your system.' \
+            'Substituting custom portable readlink implementation' \
+            'for these missing utilities.'
+        # Copied verbatim from https://stackoverflow.com/a/29835459.
+        # FIXME: We want the behavior of realpath, not realpath -e, when sourcing.
+        # shellcheck disable=all
+        rreadlink() (# Execute the function in a *subshell* to localize variables and the effect of `cd`.
+
+            target=$1 fname= targetDir= CDPATH=
+
+            # Try to make the execution environment as predictable as possible:
+            # All commands below are invoked via `command`, so we must make sure that `command`
+            # itself is not redefined as an alias or shell function.
+            # (Note that command is too inconsistent across shells, so we don't use it.)
+            # `command` is a *builtin* in bash, dash, ksh, zsh, and some platforms do not even have
+            # an external utility version of it (e.g, Ubuntu).
+            # `command` bypasses aliases and shell functions and also finds builtins
+            # in bash, dash, and ksh. In zsh, option POSIX_BUILTINS must be turned on for that
+            # to happen.
+            {
+                \unalias command
+                \unset -f command
+            } >/dev/null 2>&1
+            [ -n "$ZSH_VERSION" ] && options[POSIX_BUILTINS]=on # make zsh find *builtins* with `command` too.
+
+            while :; do # Resolve potential symlinks until the ultimate target is found.
+                [ -L "$target" ] || [ -e "$target" ] || {
+                    command printf '%s\n' "ERROR: '$target' does not exist." >&2
+                    return 1
+                }
+                command cd "$(command dirname -- "$target")" # Change to target dir; necessary for correct resolution of target path.
+                fname=$(command basename -- "$target")       # Extract filename.
+                [ "$fname" = '/' ] && fname=''               # !! curiously, `basename /` returns '/'
+                if [ -L "$fname" ]; then
+                    # Extract [next] target path, which may be defined
+                    # *relative* to the symlink's own directory.
+                    # Note: We parse `ls -l` output to find the symlink target
+                    #       which is the only POSIX-compliant, albeit somewhat fragile, way.
+                    target=$(command ls -l "$fname")
+                    target=${target#* -> }
+                    continue # Resolve [next] symlink target.
+                fi
+                break # Ultimate target reached.
+            done
+            targetDir=$(command pwd -P) # Get canonical dir. path
+            # Output the ultimate target's canonical path.
+            # Note that we manually resolve paths ending in /. and /.. to make sure we have a normalized path.
+            if [ "$fname" = '.' ]; then
+                command printf '%s\n' "${targetDir%/}"
+            elif [ "$fname" = '..' ]; then
+                # Caveat: something like /var/.. will resolve to /private (assuming /var@ -> /private/var), i.e. the '..' is applied
+                # AFTER canonicalization.
+                command printf '%s\n' "$(command dirname -- "${targetDir}")"
+            else
+                command printf '%s\n' "${targetDir%/}/$fname"
+            fi
+        )
     fi
+    preadlink() { # args: FILE...
+        if [ "$#" -le 0 ]; then
+            echo 'preadlink: missing operand' >&2
+            return "$EX_USAGE"
+        else
+            preadlink_status="$EX_OK"
+            while [ "$#" -gt 0 ]; do
+                case $__ARKENFOX_PREADLINK_IMPLEMENTATION in
+                    'realpath')  command realpath -- "$1"     ;;
+                    'readlink')  command readlink -f -- "$1"  ;;
+                    'greadlink') command greadlink -f -- "$1" ;;
+                    *)           rreadlink "$1"               ;;
+                esac
+                _status=$?
+                [ "$_status" -eq "$EX_OK" ] || preadlink_status="$_status"
+                shift
+            done
+            return "$preadlink_status"
+        fi
+    }
 }
 
 probe_open() {
@@ -381,6 +396,44 @@ missing_popen() {
     return "$EX_CNF"
 }
 
+post_init() {
+    # IMPORTANT! ARKENFOX_UPDATER_NAME must be synced to the name of this file!
+    # This is so that we may determine if the script is sourced or not
+    # by comparing it to the basename of the canonical path of $0,
+    # which is better than hard coding all the names of the
+    # interactive and non-interactive POSIX shells in existence.
+    [ -z "$ARKENFOX_UPDATER_NAME" ] && ARKENFOX_UPDATER_NAME='updater.sh'
+    arkenfox_updater_path=$(preadlink "$0") &&
+        arkenfox_updater_dir=$(dirname "$arkenfox_updater_path") &&
+        arkenfox_updater_name=$(basename "$arkenfox_updater_path") || {
+        print_error 'An unexpected error occurred' \
+            'while trying to resolve the run file path.'
+        return "$EX_UNAVAILABLE"
+    }
+    (   
+        __ARKENFOX_UPDATER_PATH=$arkenfox_updater_path &&
+            __ARKENFOX_UPDATER_DIR=$arkenfox_updater_dir &&
+            __ARKENFOX_UPDATER_NAME=$arkenfox_updater_name &&
+            readonly __ARKENFOX_UPDATER_PATH \
+                __ARKENFOX_UPDATER_DIR \
+                __ARKENFOX_UPDATER_NAME
+    ) >/dev/null 2>&1 &&
+        __ARKENFOX_UPDATER_PATH=$arkenfox_updater_path &&
+        __ARKENFOX_UPDATER_DIR=$arkenfox_updater_dir &&
+        __ARKENFOX_UPDATER_NAME=$arkenfox_updater_name &&
+        readonly __ARKENFOX_UPDATER_PATH \
+            __ARKENFOX_UPDATER_DIR \
+            __ARKENFOX_UPDATER_NAME || {
+        [ "$__ARKENFOX_UPDATER_PATH" = "$arkenfox_updater_path" ] &&
+            [ "$__ARKENFOX_UPDATER_DIR" = "$arkenfox_updater_dir" ] &&
+            [ "$__ARKENFOX_UPDATER_NAME" = "$arkenfox_updater_name" ] || {
+            print_error 'Unable to make the resolved run file path readonly.' \
+                'Try again in a new shell environment?'
+            return "$EX_TEMPFAIL"
+        }
+    }
+}
+
 main() {
     parse_options "$@" || return
     evaluate_exclusive_options || {
@@ -396,6 +449,7 @@ main() {
             'where the user has both write and execute access.'
         return "$EX_UNAVAILABLE"
     }
+    # TODO: What if failglob on?
     root_owned_files=$(find user.js userjs_*/ -user 0 -print)
     if [ -n "$root_owned_files" ]; then
         # \b is a backspace to keep the trailing newlines
@@ -548,7 +602,7 @@ update_script() {
         download_files \
             'https://raw.githubusercontent.com/arkenfox/user.js/master/updater.sh'
     ) || return
-    local_version=$(script_version "$SCRIPT_PATH") &&
+    local_version=$(script_version "$__ARKENFOX_UPDATER_PATH") &&
         master_version=$(script_version "$master_updater") || return
     # TODO: Consider just doing an equality check like in prefsCleaner.sh?
     if [ "${local_version%%.*}" -eq "${master_version%%.*}" ] &&
@@ -562,9 +616,9 @@ update_script() {
             [ "$REPLY" = 'Y' ] || [ "$REPLY" = 'y' ] ||
                 return "$EX_OK"
         fi
-        mv -f "$master_updater" "$SCRIPT_PATH" &&
-            chmod u+r+x "$SCRIPT_PATH" &&
-            "$SCRIPT_PATH" -d "$@" ||
+        mv -f "$master_updater" "$__ARKENFOX_UPDATER_PATH" &&
+            chmod u+r+x "$__ARKENFOX_UPDATER_PATH" &&
+            "$__ARKENFOX_UPDATER_PATH" -d "$@" ||
             return
     fi
 }
@@ -582,7 +636,7 @@ profile_path() {
         }
         profile_path_from_ini "$profiles_ini" || return
     else
-        printf '%s\n' "$SCRIPT_DIR"
+        printf '%s\n' "$__ARKENFOX_UPDATER_DIR"
     fi
 }
 
@@ -615,26 +669,19 @@ profile_path_from_ini() { # arg: profiles.ini
 
 select_profile() { # arg: profiles.ini
     profile_section_regex='^[[]Profile[0123456789]{1,}[]]$'
-    # FIXME: This could definitely be made more succinct and correct.
-    # shellcheck disable=SC2016
-    awk_program='{
-                 	print
-                 	while ((getline) > 0) {
-                 		if ($0 ~ /^$/) { # Should really break on new sections.
-                 			print ""
-                 			break
-                 		} else {
-                 			print
-                 		}
-                 	}
-                 }'
+    # https://unix.stackexchange.com/a/786827
+    # shellcheck disable=SC2016 # Expressions don't expand in single quotes, use double quotes for that.
+    awk_program='
+        /^[[]/ {
+            section = substr($0, 2)
+        }
+
+        (section ~ /^Profile[0123456789]+/) {
+            print
+        }
+    '
     while :; do
-        profiles=$(
-            awk "/$profile_section_regex/ $awk_program"'
-                 /^Default=/ {
-                 	print # Default profile path given in the Install* section.
-                 }' "$1"
-        )
+        profiles=$(awk "$awk_program" "$1")
         [ -n "$profiles" ] || {
             print_error 'Failed to read the profile sections in the INI file.'
             return "$EX_DATAERR"
@@ -643,8 +690,17 @@ select_profile() { # arg: profiles.ini
             printf '%s\n' "$profiles" && return
         else
             display_profiles=$(
-                printf '%s\n' "$profiles" |
-                    grep -Ev -e '^IsRelative=' -e '^Default=[01]$'
+                printf '%s\n\n' "$profiles" |
+                    grep -Ev -e '^IsRelative=' -e '^Default='
+                awk '
+                    /^[[]/ {
+                        section = substr($0, 2)
+                    }
+
+                    ((section ~ /^Install/) && /^Default=/) {
+                        print
+                    }
+                ' "$1"
             )
             cat >&2 <<EOF
 Profiles found:
@@ -658,9 +714,23 @@ EOF
             printf '\n\n'
             case $REPLY in
                 0 | [1-9] | [1-9][0-9]*)
+                    # shellcheck disable=SC2016 # Expressions don't expand in single quotes, use double quotes for that.
+                    awk_program_modified='
+                        BEGIN {
+                            regex = "^Profile"select"[]]"
+                        }
+
+                        /^[[]/ {
+                            section = substr($0, 2)
+                        }
+
+                        section ~ regex {
+                            print
+                        }
+                    '
                     selected_profile=$(
                         printf '%s\n' "$profiles" |
-                            awk '/^[[]Profile'"$REPLY"'[]]$/ '"$awk_program"
+                            awk -v select="$REPLY" "$awk_program_modified"
                     ) &&
                         [ -n "$selected_profile" ] &&
                         printf '%s\n' "$selected_profile" && return ||
@@ -715,7 +785,7 @@ EOF
         print_ok 'ESR related preferences have been activated!'
     fi
     if ! is_option_present "$_N_NO_OVERRIDES"; then
-        (
+        (   
             IFS=,
             set -f
             # shellcheck disable=SC2086
@@ -890,29 +960,33 @@ b loop
 EOF
     )
     # Add LC_ALL=C to prevent indefinite loop in some cases:
-    # https://stackoverflow.com/questions/13061785/#comment93013794_13062074.
+    # https://stackoverflow.com/q/13061785/#comment93013794_13062074.
     LC_ALL=C sed -ne "$remccoms3" "$1" |
         sed '/^[[:space:]]*$/d' # Remove blank lines.
 }
 
 init
 init_status=$?
-SCRIPT_PATH=$(preadlink "$0") &&
-    SCRIPT_DIR=$(dirname "$SCRIPT_PATH") &&
-    SCRIPT_NAME=$(basename "$SCRIPT_PATH") || {
-    echo 'Something unexpected happened' \
-        'while trying to resolve the script path and name.' >&2
-    exit 69 # Service unavailable.
-}
-if [ "$SCRIPT_NAME" = "$ARKENFOX_UPDATER_NAME" ]; then
-    # This script is likely executed, not sourced.
-    [ "$init_status" -eq 0 ] && main "$@" || exit
+if [ "$init_status" -eq 0 ]; then
+    if [ "$__ARKENFOX_UPDATER_NAME" = "$ARKENFOX_UPDATER_NAME" ]; then
+        main "$@"
+    else
+        print_ok 'The arkenfox updater script has been successfully sourced.'
+        print_warning 'If this is not intentional,' \
+            'you may have either made a typo in the shell commands,' \
+            'or renamed this file without defining the environment variable' \
+            'ARKENFOX_UPDATER_NAME to match the new name.' \
+            "
+
+         Detected name of the run file: $__ARKENFOX_UPDATER_NAME
+         ARKENFOX_UPDATER_NAME: $ARKENFOX_UPDATER_NAME
+        
+        " \
+            'Note that this is not the expected way' \
+            'to run the arkenfox updater script.' \
+            'Dot sourcing support is experimental' \
+            'and only provided for convenience.'
+    fi
 else
-    # This script is likely sourced, not executed.
-    [ "$init_status" -eq 0 ] &&
-        print_warning 'We detected this script is being dot sourced.' \
-            'If this is not intentional, either the environment variable' \
-            'ARKENFOX_UPDATER_NAME is out of sync with the name of this file' \
-            'or your system is rather peculiar.'
     (exit "$init_status") && true # https://stackoverflow.com/a/53454039
 fi
