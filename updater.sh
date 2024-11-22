@@ -6,21 +6,15 @@
 
 # IMPORTANT! The version string must be on the 5th line of this file
 # and must be of the format "version: MAJOR.MINOR" (spaces are optional).
-# This restriction is set by the function script_version.
+# This restriction is set by the function arkenfox_script_version.
+
+# Example advanced script usage:
+# $ PROBE_MISSING=1 ./updater.sh -v
+# $ ( . ./updater.sh && WGET__IMPLEMENTATION=wget arkenfox_updater )
 
 # This ShellCheck warning is just noise for those who know what they are doing:
 # "Note that A && B || C is not if-then-else. C may run when A is true."
 # shellcheck disable=SC2015
-
-# TODO: Check echo/printf usage.
-# TODO: Check all relative paths as arguments to a command begin with ./.
-# TODO: Check globbing is disabled before splitting on unquoted variables if globbing is not needed.
-# TODO: Check all code paths where return on error is necessary and ensure proper exit status is used.
-# TODO: Check these shell-aborting errors are properly handled first in a subshell:
-#  1. Shell language syntax error
-#  2. Special built-in utility error, including redirection error
-#  3. Variable assignment error
-#  4. Expansion error
 
 ###############################################################################
 ####                   === Common utility functions ===                    ####
@@ -31,211 +25,139 @@
 # https://stackoverflow.com/q/1101957
 exit_status_definitions() {
     cut -d'#' -f1 <<'EOF'
-EX_OK=0           # Successful exit status.
-EX_FAIL=1         # Failed exit status.
-EX_USAGE=2        # Command line usage error.
-EX__BASE=64       # Base value for error messages.
-EX_DATAERR=65     # Data format error.
-EX_NOINPUT=66     # Cannot open input.
-EX_NOUSER=67      # Addressee unknown.
-EX_NOHOST=68      # Host name unknown.
-EX_UNAVAILABLE=69 # Service unavailable.
-EX_SOFTWARE=70    # Internal software error.
-EX_OSERR=71       # System error (e.g., can't fork).
-EX_OSFILE=72      # Critical OS file missing.
-EX_CANTCREAT=73   # Can't create (user) output file.
-EX_IOERR=74       # Input/output error.
-EX_TEMPFAIL=75    # Temp failure; user is invited to retry.
-EX_PROTOCOL=76    # Remote error in protocol.
-EX_NOPERM=77      # Permission denied.
-EX_CONFIG=78      # Configuration error.
-EX_NOEXEC=126     # A file to be executed was found, but it was not an executable utility.
-EX_CNF=127        # A utility to be executed was not found.
-EX_SIGHUP=129     # A command was interrupted by SIGHUP (1).
-EX_SIGINT=130     # A command was interrupted by SIGINT (2).
-EX_SIGQUIT=131    # A command was interrupted by SIGQUIT (3).
-EX_SIGABRT=134    # A command was interrupted by SIGABRT (6).
-EX_SIGKILL=137    # A command was interrupted by SIGKILL (9).
-EX_SIGALRM=142    # A command was interrupted by SIGALRM (14).
-EX_SIGTERM=143    # A command was interrupted by SIGTERM (15).
+_EX_OK=0           # Successful exit status.
+_EX_FAIL=1         # Failed exit status.
+_EX_USAGE=2        # Command line usage error.
+_EX__BASE=64       # Base value for error messages.
+_EX_DATAERR=65     # Data format error.
+_EX_NOINPUT=66     # Cannot open input.
+_EX_NOUSER=67      # Addressee unknown.
+_EX_NOHOST=68      # Host name unknown.
+_EX_UNAVAILABLE=69 # Service unavailable.
+_EX_SOFTWARE=70    # Internal software error.
+_EX_OSERR=71       # System error (e.g., can't fork).
+_EX_OSFILE=72      # Critical OS file missing.
+_EX_CANTCREAT=73   # Can't create (user) output file.
+_EX_IOERR=74       # Input/output error.
+_EX_TEMPFAIL=75    # Temp failure; user is invited to retry.
+_EX_PROTOCOL=76    # Remote error in protocol.
+_EX_NOPERM=77      # Permission denied.
+_EX_CONFIG=78      # Configuration error.
+_EX_NOEXEC=126     # A file to be executed was found, but it was not an executable utility.
+_EX_CNF=127        # A utility to be executed was not found.
+_EX_SIGHUP=129     # A command was interrupted by SIGHUP (1).
+_EX_SIGINT=130     # A command was interrupted by SIGINT (2).
+_EX_SIGQUIT=131    # A command was interrupted by SIGQUIT (3).
+_EX_SIGABRT=134    # A command was interrupted by SIGABRT (6).
+_EX_SIGKILL=137    # A command was interrupted by SIGKILL (9).
+_EX_SIGALRM=142    # A command was interrupted by SIGALRM (14).
+_EX_SIGTERM=143    # A command was interrupted by SIGTERM (15).
 EOF
 }
 
-init() {
-    # The pipefail option was added in POSIX.1-2024 (SUSv5),
-    # but has long been supported by most major POSIX-compatible shells,
-    # with the notable exceptions of dash and ksh88-based shells.
-    # There are some caveats to switching on this option though:
-    # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
-    # Note that we have to test in a subshell first so that
-    # the non-interactive POSIX sh is not aborted by an error in set,
-    # a special built-in utility:
-    # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
-    # shellcheck disable=SC3040 # In POSIX sh, set option pipefail is undefined.
-    (set -o pipefail >/dev/null 2>&1) && set -o pipefail
-    # To prevent the accidental insertion of SGR commands in the grep output,
-    # even when not directed at a terminal, and because the --color option
-    # is neither specified in POSIX nor supported by OpenBSD's grep,
-    # we explicitly set the following three environment variables:
-    export GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se='
-    export GREP_COLOR='0' # Obsolete. Use on macOS and some Unix operating systems
-    :                     # where the provided grep implementations do not support GREP_COLORS.
-    export GREP_OPTIONS=  # Obsolete. Use on systems with GNU grep 2.20 or earlier installed.
-    while IFS='=' read -r name code; do
-        # Trim trailing whitespace characters. Needed for zsh and yash.
-        code=${code%"${code##*[![:space:]]}"} # https://stackoverflow.com/a/3352015
-        # "When reporting the exit status with the special parameter '?',
-        # the shell shall report the full eight bits of exit status available."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
-        # "exit [n]: If n is specified, but its value is not between 0 and 255
-        # inclusively, the exit status is undefined."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
-        [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
-            printf '%s %s\n' 'Undefined exit status in the definition:' \
-                "$name=$code." >&2
-            return 70 # Internal software error.
-        }
-        (eval readonly "$name=$code" 2>/dev/null) &&
-            eval readonly "$name=$code" || {
-            eval [ "\"\$$name\"" = "$code" ] &&
-                continue # $name is already readonly and set to $code.
-            printf '%s %s\n' "Unable to make the exit status $name readonly." \
-                'Try again in a new shell environment?' >&2
-            return 75 # Temp failure.
-        }
-    done <<EOF
-$(exit_status_definitions)
-EOF
-    probe_environment && post_init
-}
-
-# Copied verbatim from https://unix.stackexchange.com/a/464963.
-read1() { # arg: <variable-name>
-    if [ -t 0 ]; then
-        # if stdin is a tty device, put it out of icanon, set min and
-        # time to sane value, but don't otherwise touch other input or
-        # or local settings (echo, isig, icrnl...). Take a backup of the
-        # previous settings beforehand.
-        saved_tty_settings=$(stty -g)
-        stty -icanon min 1 time 0
-    fi
-    eval "$1="
-    while
-        # read one byte, using a work around for the fact that command
-        # substitution strips trailing newline characters.
-        c=$(
-            dd bs=1 count=1 2>/dev/null
-            echo .
-        )
-        c=${c%.}
-
-        # break out of the loop on empty input (eof) or if a full character
-        # has been accumulated in the output variable (using "wc -m" to count
-        # the number of characters).
-        [ -n "$c" ] &&
-            eval "$1=\${$1}"'$c
-        [ "$(($(printf %s "${'"$1"'}" | wc -m)))" -eq 0 ]'
-    do
-        continue
-    done
-    if [ -t 0 ]; then
-        # restore settings saved earlier if stdin is a tty device.
-        stty "$saved_tty_settings"
-    fi
+is_option_present() { # arg: name
+    [ "$1" = true ] || {
+        [ "$1" != false ] && [ "${1:-0}" != 0 ]
+    }
 }
 
 print_error() { # args: [ARGUMENT]...
-    printf '%s\n' "${RED}ERROR: $*${RESET}" >&2
+    printf '%s\n' "${_TPUT_AF_RED}ERROR: $*${_TPUT_SGR0}" >&2
 }
 
-print_warning() { # args: [ARGUMENT]...
-    printf '%s\n' "${YELLOW}WARNING: $*${RESET}" >&2
+print_info() { # args: [ARGUMENT]...
+    printf '%b' "$*" >&2
 }
 
 print_ok() { # args: [ARGUMENT]...
-    printf '%s\n' "${GREEN}OK: $*${RESET}" >&2
+    printf '%s\n' "${_TPUT_AF_GREEN}OK: $*${_TPUT_SGR0}" >&2
 }
 
-print_prompt() { # args: [ARGUMENT]...
-    printf '%s ' "$*" >&2
+print_warning() { # args: [ARGUMENT]...
+    printf '%s\n' "${_TPUT_AF_YELLOW}WARNING: $*${_TPUT_SGR0}" >&2
 }
 
-print_confirm() { # args: [ARGUMENT]...
-    printf '%s ' "${RED}$*${RESET}" >&2
+print_yN() { # args: [ARGUMENT]...
+    printf '%s' "${_TPUT_AF_RED}$* [y/N]${_TPUT_SGR0}" >&2
 }
 
-probe_terminal() {
-    if [ -t 1 ] && [ -t 2 ] && tput setaf bold sgr0 >/dev/null 2>&1; then
-        RED=$(tput setaf 1)
-        BLUE=$(tput setaf 4)
-        BBLUE=$(tput bold setaf 4)
-        GREEN=$(tput setaf 2)
-        YELLOW=$(tput setaf 3)
-        CYAN=$(tput setaf 6)
-        RESET=$(tput sgr0)
+probe_mktemp_() {
+    if command -v mktemp >/dev/null 2>&1; then
+        MKTEMP__IMPLEMENTATION='mktemp'
+    elif command -v m4 >/dev/null 2>&1; then
+        MKTEMP__IMPLEMENTATION='m4'
+        print_warning 'Unable to find mktemp on your system.' \
+            "Substituting m4's mkstemp macro for this missing utility."
     else
-        RED=
-        BLUE=
-        BBLUE=
-        GREEN=
-        YELLOW=
-        CYAN=
-        RESET=
-    fi
-}
-
-probe_run_user() {
-    if [ "$(id -u)" -eq 0 ]; then
-        print_error "You shouldn't run this with elevated privileges" \
-            '(such as with doas/sudo).'
-        return "$EX_USAGE"
-    fi
-}
-
-probe_downloader() {
-    if command -v curl >/dev/null 2>&1; then
-        pdownloader() { # args: FILE URL...
-            command curl --max-redirs 3 -so "$@"
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        pdownloader() { # args: FILE URL...
-            command wget --max-redirect 3 -qO "$@"
-        }
-    else
-        missing_pdownloader
-    fi
-}
-
-probe_mktemp() {
-    if ! command -v mktemp >/dev/null 2>&1; then
-        if command -v m4 >/dev/null 2>&1; then
-            print_warning 'mktemp is not found on your system.' \
-                "Substituting m4's mkstemp macro for this missing utility."
-            # Copied verbatim from https://unix.stackexchange.com/a/181996.
-            mktemp() {
-                echo 'mkstemp(template)' |
-                    m4 -D template="${TMPDIR:-/tmp}/baseXXXXXX"
-            }
-        else
-            missing_mktemp
+        MKTEMP__IMPLEMENTATION=
+        if is_option_present "$PROBE_MISSING"; then
+            missing_mktemp_
+            return
         fi
     fi
+    mktemp_() {
+        case $MKTEMP__IMPLEMENTATION in
+            'mktemp') command mktemp ;;
+            'm4')
+                # Copied verbatim from https://unix.stackexchange.com/a/181996.
+                echo 'mkstemp(template)' |
+                    m4 -D template="${TMPDIR:-/tmp}/baseXXXXXX"
+                ;;
+            *) missing_mktemp_ ;;
+        esac
+    }
 }
 
-probe_readlink() {
-    if command realpath -- . >/dev/null 2>&1; then
-        __ARKENFOX_PREADLINK_IMPLEMENTATION='realpath'
-    elif command readlink -f -- . >/dev/null 2>&1; then
-        __ARKENFOX_PREADLINK_IMPLEMENTATION='readlink'
-    elif command greadlink -f -- . >/dev/null 2>&1; then
-        __ARKENFOX_PREADLINK_IMPLEMENTATION='greadlink'
+probe_open_() {
+    if command -v xdg-open >/dev/null 2>&1; then
+        OPEN__IMPLEMENTATION='xdg-open'
+    elif command -v open >/dev/null 2>&1; then
+        OPEN__IMPLEMENTATION='open'
     else
-        print_warning 'Neither realpath nor readlink or greadlink' \
-            'with support for the -f option is found on your system.' \
-            'Substituting custom portable readlink implementation' \
+        OPEN__IMPLEMENTATION=
+        if is_option_present "$PROBE_MISSING"; then
+            missing_open_
+            return
+        fi
+    fi
+    open_() { # args: FILE...
+        case $OPEN__IMPLEMENTATION in
+            'xdg-open')
+                if [ "$#" -le 0 ]; then
+                    command xdg-open
+                else
+                    open__status="${_EX_OK:-0}"
+                    while [ "$#" -gt 0 ]; do
+                        command xdg-open "$1"
+                        status=$?
+                        [ "$status" -eq "${_EX_OK:-0}" ] ||
+                            open__status="$status"
+                        shift
+                    done
+                    return "$open__status"
+                fi
+                ;;
+            'open') command open "$@" ;;
+            *) missing_open_ ;;
+        esac
+    }
+}
+
+probe_realpath_() {
+    if command realpath -- . >/dev/null 2>&1; then
+        REALPATH__IMPLEMENTATION='realpath'
+    elif command readlink -f -- . >/dev/null 2>&1; then
+        REALPATH__IMPLEMENTATION='readlink'
+    elif command greadlink -f -- . >/dev/null 2>&1; then
+        REALPATH__IMPLEMENTATION='greadlink'
+    else
+        REALPATH__IMPLEMENTATION='rreadlink'
+        print_warning 'Unable to find realpath or readlink' \
+            'with support for the -f option on your system.' \
+            'Substituting custom portable realpath implementation' \
             'for these missing utilities.'
         # Copied verbatim from https://stackoverflow.com/a/29835459.
-        # FIXME: We want the behavior of realpath, not realpath -e, when sourcing.
+        # FIXME: Desired behavior when sourcing is that of realpath, not realpath -e.
         # shellcheck disable=all
         rreadlink() (# Execute the function in a *subshell* to localize variables and the effect of `cd`.
 
@@ -289,79 +211,279 @@ probe_readlink() {
             fi
         )
     fi
-    preadlink() { # args: FILE...
+    realpath_() { # args: FILE...
         if [ "$#" -le 0 ]; then
-            echo 'preadlink: missing operand' >&2
-            return "$EX_USAGE"
+            echo 'realpath_: missing operand' >&2
+            return "${_EX_USAGE:-2}"
         else
-            preadlink_status="$EX_OK"
+            realpath__status="${_EX_OK:-0}"
             while [ "$#" -gt 0 ]; do
-                case $__ARKENFOX_PREADLINK_IMPLEMENTATION in
-                    'realpath')  command realpath -- "$1"     ;;
-                    'readlink')  command readlink -f -- "$1"  ;;
+                case $REALPATH__IMPLEMENTATION in
+                    'realpath') command realpath -- "$1" ;;
+                    'readlink') command readlink -f -- "$1" ;;
                     'greadlink') command greadlink -f -- "$1" ;;
-                    *)           rreadlink "$1"               ;;
+                    *) rreadlink "$1" ;;
                 esac
-                _status=$?
-                [ "$_status" -eq "$EX_OK" ] || preadlink_status="$_status"
+                status=$?
+                [ "$status" -eq "${_EX_OK:-0}" ] || realpath__status="$status"
                 shift
             done
-            return "$preadlink_status"
+            return "$realpath__status"
         fi
     }
 }
 
-probe_open() {
-    if command -v xdg-open >/dev/null 2>&1; then
-        popen() { # args: FILE...
-            if [ "$#" -le 0 ]; then
-                command xdg-open
-            else
-                while [ "$#" -gt 0 ]; do
-                    command xdg-open "$1"
-                    shift
-                done
-            fi
-        }
-    elif command -v open >/dev/null 2>&1; then
-        popen() { # args: FILE...
-            command open "$@"
-        }
+probe_terminal() {
+    if [ -t 1 ] && [ -t 2 ] && tput setaf bold sgr0 >/dev/null 2>&1; then
+        _TPUT_AF_RED=$(tput setaf 1)
+        _TPUT_AF_BLUE=$(tput setaf 4)
+        _TPUT_AF_BLUE_BOLD=$(tput bold setaf 4)
+        _TPUT_AF_GREEN=$(tput setaf 2)
+        _TPUT_AF_YELLOW=$(tput setaf 3)
+        _TPUT_AF_CYAN=$(tput setaf 6)
+        _TPUT_SGR0=$(tput sgr0)
     else
-        popen() {
-            missing_popen
-        }
+        _TPUT_AF_RED=
+        _TPUT_AF_BLUE=
+        _TPUT_AF_BLUE_BOLD=
+        _TPUT_AF_GREEN=
+        _TPUT_AF_YELLOW=
+        _TPUT_AF_CYAN=
+        _TPUT_SGR0=
     fi
 }
 
-is_option_present() { # arg: name
-    [ "${1:-0}" != 0 ]
-}
-
-download_files() { # args: URL...
-    # It is not easy to write portable trap commands without side effects.
-    # As mktemp creates temporary files that are periodically cleared on any
-    # sane system, we leave it to the OS or the user to do the cleaning
-    # themselves for simplicity's sake.
-    output_temp=$(mktemp) &&
-        pdownloader "$output_temp" "$@" 2>/dev/null &&
-        printf '%s\n' "$output_temp" || {
-        print_error "Could not download $*."
-        return "$EX_UNAVAILABLE"
+probe_wget_() {
+    if command -v curl >/dev/null 2>&1; then
+        WGET__IMPLEMENTATION='curl'
+    elif command -v wget >/dev/null 2>&1; then
+        WGET__IMPLEMENTATION='wget'
+    else
+        WGET__IMPLEMENTATION=
+        if is_option_present "$PROBE_MISSING"; then
+            missing_wget_
+            return
+        fi
+    fi
+    wget_() { # args: FILE URL
+        case $WGET__IMPLEMENTATION in
+            'curl') command curl --max-redirs 3 -so "$1" "$2" ;;
+            'wget') command wget --max-redirect 3 -qO "$1" "$2" ;;
+            *) missing_wget_ ;;
+        esac
     }
 }
 
-# TODO: Consider just printing the 5th line like in userjs_version?
-script_version() { # arg: {updater.sh|prefsCleaner.sh}
+# Copied verbatim from https://unix.stackexchange.com/a/464963.
+read1() { # arg: <variable-name>
+    if [ -t 0 ]; then
+        # if stdin is a tty device, put it out of icanon, set min and
+        # time to sane value, but don't otherwise touch other input or
+        # or local settings (echo, isig, icrnl...). Take a backup of the
+        # previous settings beforehand.
+        saved_tty_settings=$(stty -g)
+        stty -icanon min 1 time 0
+    fi
+    eval "$1="
+    while
+        # read one byte, using a work around for the fact that command
+        # substitution strips trailing newline characters.
+        c=$(
+            dd bs=1 count=1 2>/dev/null
+            echo .
+        )
+        c=${c%.}
+
+        # break out of the loop on empty input (eof) or if a full character
+        # has been accumulated in the output variable (using "wc -m" to count
+        # the number of characters).
+        [ -n "$c" ] &&
+            eval "$1=\${$1}"'$c
+        [ "$(($(printf %s "${'"$1"'}" | wc -m)))" -eq 0 ]'
+    do
+        continue
+    done
+    if [ -t 0 ]; then
+        # restore settings saved earlier if stdin is a tty device.
+        stty "$saved_tty_settings"
+    fi
+}
+
+_arkenfox_init() {
+    # The pipefail option was added in POSIX.1-2024 (SUSv5),
+    # and has long been supported by most major POSIX-compatible shells,
+    # with the notable exceptions of dash and ksh88-based shells.
+    # There are some caveats to switching on this option though:
+    # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
+    # Note that we have to test in a subshell first so that
+    # the non-interactive POSIX sh is not aborted by an error in set,
+    # a special built-in utility:
+    # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
+    # shellcheck disable=SC3040 # In POSIX sh, set option pipefail is undefined.
+    (set -o pipefail 2>/dev/null) && set -o pipefail
+    # Disable the nounset option as yash enables it by default,
+    # which is both inconvenient and against the POSIX recommendation.
+    # Use ShellCheck or ${parameter?word} to catch unset variables instead.
+    # The set -o option form is picked for readability and supported
+    # if the system supports the User Portability Utilities option.
+    (set +o nounset >/dev/null 2>&1) && set +o nounset || set +u || return
+    # To prevent the accidental insertion of SGR commands in the grep output,
+    # even when not directed at a terminal, and because the --color option
+    # is neither specified in POSIX nor supported by OpenBSD's grep,
+    # we explicitly set the following three environment variables:
+    export GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se='
+    export GREP_COLOR='0' # Obsolete. Use on macOS and some Unix operating systems
+    :                     # where the provided grep implementations do not support GREP_COLORS.
+    export GREP_OPTIONS=  # Obsolete. Use on systems with GNU grep 2.20 or earlier installed.
+    exit_status_definitions >/dev/null || return
+    while IFS='=' read -r name code; do
+        # Trim trailing whitespace characters. Needed for zsh and yash.
+        code=${code%"${code##*[![:space:]]}"} # https://stackoverflow.com/a/3352015
+        # "When reporting the exit status with the special parameter '?',
+        # the shell shall report the full eight bits of exit status available."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
+        # "exit [n]: If n is specified, but its value is not between 0 and 255
+        # inclusively, the exit status is undefined."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
+        [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
+            printf '%s %s\n' 'Undefined exit status in the definition:' \
+                "$name=$code." >&2
+            return 70 # Internal software error.
+        }
+        (eval readonly "$name=$code" 2>/dev/null) &&
+            eval readonly "$name=$code" || {
+            eval [ "\"\$$name\"" = "$code" ] &&
+                continue # $name is already readonly and set to $code.
+            printf '%s %s\n' "Failed to make the exit status $name readonly." \
+                'Try again in a new shell environment?' >&2
+            return 75 # Temp failure.
+        }
+    done <<EOF
+$(exit_status_definitions)
+EOF
+}
+
+# https://kb.mozillazine.org/Profiles.ini_file
+arkenfox_firefox_profile_path_select() {
+    if [ "$(uname)" = 'Darwin' ]; then # macOS
+        profiles_ini="$HOME/Library/Application\ Support/Firefox/profiles.ini"
+    else
+        profiles_ini="$HOME/.mozilla/firefox/profiles.ini"
+    fi
+    [ -f "$profiles_ini" ] || {
+        print_error 'Failed to find the Firefox profiles.ini file' \
+            'at the standard location.'
+        return "${_EX_NOINPUT:?}"
+    }
+    selected_profile=$(arkenfox_firefox_profile_select "$profiles_ini") ||
+        return
+    path=$(printf '%s\n' "$selected_profile" | sed -n 's/^Path=\(.*\)$/\1/p')
+    is_relative=$(
+        printf '%s\n' "$selected_profile" |
+            sed -n 's/^IsRelative=\([01]\)$/\1/p'
+    )
+    [ -n "$path" ] && [ -n "$is_relative" ] || {
+        print_error 'Failed to get the value of the Path or IsRelative key' \
+            'from the selected Firefox profile section.'
+        return "${_EX_DATAERR:?}"
+    }
+    if [ "$is_relative" = 1 ]; then
+        default_profile_dir=$(dirname "$profiles_ini") &&
+            path="${default_profile_dir%/}/$path" || {
+            print_error 'Failed to convert the selected Firefox profile path' \
+                'from relative to absolute.'
+            return "${_EX_DATAERR:?}"
+        }
+    fi
+    printf '%s\n' "$path"
+}
+
+arkenfox_firefox_profile_select() { # arg: profiles.ini
+    while :; do
+        # https://unix.stackexchange.com/a/786827
+        profiles=$(
+            awk '/^[[]/ { section = substr($0, 1) }
+                 (section ~ /^[[]Profile[0123456789]+[]]$/) { print }' "$1"
+        ) &&
+            profile_count=$(
+                printf '%s' "$profiles" |
+                    grep -Ec '^[[]Profile[0123456789]+[]]$'
+            ) &&
+            [ "${profile_count:-0}" -gt 0 ] || {
+            print_error 'Failed to find the profile sections in the INI file.'
+            return "${_EX_DATAERR:?}"
+        }
+        if [ "$profile_count" -eq 1 ]; then
+            printf '%s\n' "$profiles"
+            return
+        else
+            display_profiles=$(
+                printf '%s\n\n' "$profiles" |
+                    grep -Ev -e '^IsRelative=' -e '^Default=' &&
+                    awk '/^[[]/ { section = substr($0, 2) }
+                         ((section ~ /^Install/) && /^Default=/) { print }' \
+                        "$1"
+            )
+            cat >&2 <<EOF
+Profiles found:
+––––––––––––––––––––––––––––––
+$display_profiles
+––––––––––––––––––––––––––––––
+EOF
+            print_info 'Select the profile number' \
+                '(0 for Profile0, 1 for Profile1, etc; q to quit): '
+            read -r REPLY
+            printf '\n\n' >&2
+            case $REPLY in
+                0 | [1-9] | [1-9][0-9]*)
+                    selected_profile=$(
+                        printf '%s\n' "$profiles" |
+                            awk -v select="$REPLY" \
+                                'BEGIN { regex = "^[[]Profile"select"[]]$" }
+                                 /^[[]/ { section = substr($0, 1) }
+                                 section ~ regex { print }'
+                    ) &&
+                        [ -n "$selected_profile" ] &&
+                        printf '%s\n' "$selected_profile" &&
+                        return ||
+                        print_error "Failed to select Profile$REPLY."
+                    ;;
+                [qQ]) return "${_EX_FAIL:?}" ;;
+                *) print_warning 'Invalid input: not a whole number.' ;;
+            esac
+        fi
+    done
+}
+
+arkenfox_script_version() { # arg: {updater.sh|prefsCleaner.sh}
     # Why not [[:digit:]] or [0-9]: https://unix.stackexchange.com/a/654391.
     # Short answer: they are locale-dependent.
     version_format='[0123456789]\{1,\}\.[0123456789]\{1,\}'
     version=$(
         sed -n "5s/.*version:[[:blank:]]*\($version_format\).*/\1/p" "$1"
     ) &&
+        [ -n "$version" ] &&
         printf '%s\n' "$version" || {
-        print_error "Could not determine script version from the file $1."
-        return "$EX_DATAERR"
+        print_error "Failed to determine the version of the script file: $1."
+        return "${_EX_DATAERR:?}"
+    }
+}
+
+arkenfox_userjs_version() { # arg: user.js
+    [ -f "$1" ] && sed -n '4p' "$1" || echo 'Unknown'
+}
+
+download_file() { # arg: URL
+    # The try-finally construct can be implemented as a series of trap commands.
+    # However, it is notoriously difficult to write them portably and reliably.
+    # Since mktemp_ creates temporary files that are periodically cleared
+    # on any sane system, we leave it to the OS or the user to do the cleaning
+    # themselves for simplicity's sake.
+    output_temp=$(mktemp_) &&
+        wget_ "$output_temp" "$1" 2>/dev/null &&
+        printf '%s\n' "$output_temp" || {
+        print_error "Failed to download file from the URL: $1."
+        return "${_EX_UNAVAILABLE:?}"
     }
 }
 
@@ -369,152 +491,75 @@ script_version() { # arg: {updater.sh|prefsCleaner.sh}
 ####                 === updater.sh specific functions ===                 ####
 ###############################################################################
 
-probe_environment() {
+_arkenfox_updater_init() {
+    missing_mktemp_() {
+        print_error 'Failed to find mktemp or m4 on your system.'
+        return "${_EX_CNF:?}"
+    }
+    missing_open_() {
+        print_error 'Failed to find xdg-open or open on your system.'
+        return "${_EX_CNF:?}"
+    }
+    missing_wget_() {
+        print_error 'Failed to find curl or wget on your system.'
+        return "${_EX_CNF:?}"
+    }
     probe_terminal &&
-        probe_run_user &&
-        probe_downloader &&
-        probe_mktemp &&
-        probe_readlink &&
-        probe_open || {
-        print_error 'Encountered issues while initializing the environment.'
-        return "$EX_CONFIG"
-    }
-}
-
-missing_pdownloader() {
-    print_error 'This script requires curl or wget on your PATH.'
-    return "$EX_CNF"
-}
-
-missing_mktemp() {
-    print_error 'This script requires mktemp or m4 on your PATH.'
-    return "$EX_CNF"
-}
-
-missing_popen() {
-    print_error 'Opening files requires xdg-open or open on your PATH.'
-    return "$EX_CNF"
-}
-
-post_init() {
+        PROBE_MISSING=1 probe_wget_ &&
+        PROBE_MISSING=1 probe_mktemp_ &&
+        PROBE_MISSING=1 probe_realpath_ &&
+        probe_open_ ||
+        return
     # IMPORTANT! ARKENFOX_UPDATER_NAME must be synced to the name of this file!
-    # This is so that we may determine if the script is sourced or not
+    # This is so that we may somewhat determine if the script is sourced or not
     # by comparing it to the basename of the canonical path of $0,
-    # which is better than hard coding all the names of the
+    # which should be better than hard coding all the names of the
     # interactive and non-interactive POSIX shells in existence.
+    # Cf. https://stackoverflow.com/a/28776166.
     [ -z "$ARKENFOX_UPDATER_NAME" ] && ARKENFOX_UPDATER_NAME='updater.sh'
-    arkenfox_updater_path=$(preadlink "$0") &&
-        arkenfox_updater_dir=$(dirname "$arkenfox_updater_path") &&
-        arkenfox_updater_name=$(basename "$arkenfox_updater_path") || {
-        print_error 'An unexpected error occurred' \
-            'while trying to resolve the run file path.'
-        return "$EX_UNAVAILABLE"
+    run_path=$(realpath_ "$0") &&
+        run_dir=$(dirname "$run_path") &&
+        run_name=$(basename "$run_path") || {
+        print_error 'Failed to resolve the run file path.'
+        return "${_EX_UNAVAILABLE:?}"
     }
-    (   
-        __ARKENFOX_UPDATER_PATH=$arkenfox_updater_path &&
-            __ARKENFOX_UPDATER_DIR=$arkenfox_updater_dir &&
-            __ARKENFOX_UPDATER_NAME=$arkenfox_updater_name &&
-            readonly __ARKENFOX_UPDATER_PATH \
-                __ARKENFOX_UPDATER_DIR \
-                __ARKENFOX_UPDATER_NAME
-    ) >/dev/null 2>&1 &&
-        __ARKENFOX_UPDATER_PATH=$arkenfox_updater_path &&
-        __ARKENFOX_UPDATER_DIR=$arkenfox_updater_dir &&
-        __ARKENFOX_UPDATER_NAME=$arkenfox_updater_name &&
-        readonly __ARKENFOX_UPDATER_PATH \
-            __ARKENFOX_UPDATER_DIR \
-            __ARKENFOX_UPDATER_NAME || {
-        [ "$__ARKENFOX_UPDATER_PATH" = "$arkenfox_updater_path" ] &&
-            [ "$__ARKENFOX_UPDATER_DIR" = "$arkenfox_updater_dir" ] &&
-            [ "$__ARKENFOX_UPDATER_NAME" = "$arkenfox_updater_name" ] || {
-            print_error 'Unable to make the resolved run file path readonly.' \
+    (
+        readonly "_ARKENFOX_UPDATER_RUN_PATH=$run_path" \
+            "_ARKENFOX_UPDATER_RUN_DIR=$run_dir" \
+            "_ARKENFOX_UPDATER_RUN_NAME=$run_name" 2>/dev/null
+    ) &&
+        readonly "_ARKENFOX_UPDATER_RUN_PATH=$run_path" \
+            "_ARKENFOX_UPDATER_RUN_DIR=$run_dir" \
+            "_ARKENFOX_UPDATER_RUN_NAME=$run_name" || {
+        [ "$_ARKENFOX_UPDATER_RUN_PATH" = "$run_path" ] &&
+            [ "$_ARKENFOX_UPDATER_RUN_DIR" = "$run_dir" ] &&
+            [ "$_ARKENFOX_UPDATER_RUN_NAME" = "$run_name" ] || {
+            print_error 'Failed to make the resolved run file path readonly.' \
                 'Try again in a new shell environment?'
-            return "$EX_TEMPFAIL"
+            return "${_EX_TEMPFAIL:?}"
         }
     }
 }
 
-main() {
-    parse_options "$@" || return
-    evaluate_exclusive_options || {
-        status=$?
-        # See comments above evaluate_exclusive_options() for an explanation.
-        [ "$status" -eq "$EX__BASE" ] && return "$EX_OK" || return "$status"
-    }
-    show_banner
-    is_option_present "$_D_DONT_UPDATE" || update_script "$@" || return
-    [ -n "$PROFILE_PATH" ] || PROFILE_PATH=$(profile_path) || return
-    [ -w "$PROFILE_PATH" ] && cd "$PROFILE_PATH" || {
-        print_error "PROFILE_PATH '$PROFILE_PATH' needs to be a directory" \
-            'where the user has both write and execute access.'
-        return "$EX_UNAVAILABLE"
-    }
-    # TODO: What if failglob on?
-    root_owned_files=$(find user.js userjs_*/ -user 0 -print)
-    if [ -n "$root_owned_files" ]; then
-        # \b is a backspace to keep the trailing newlines
-        # from being stripped by command substitution.
-        print_error 'It looks like this script was previously run' \
-            'with elevated privileges.' \
-            'You will need to change ownership of' \
-            'the following files to your user:' \
-            "$(printf '%s\n\b' '')$root_owned_files"
-        return "$EX_CANTCREAT"
-    fi
-    update_userjs || return
+arkenfox_updater() { # args: [options]
+    arkenfox_updater_parse_options "$@" &&
+        arkenfox_updater_set_profile_path &&
+        arkenfox_updater_check_nonroot || return
+    arkenfox_updater_exec_general_options
+    status=$?
+    # The exit status _EX__BASE indicates that no general option is executed.
+    [ "$status" -eq "${_EX__BASE:?}" ] || return "$status"
+    arkenfox_updater_banner
+    is_option_present "$_ARKENFOX_UPDATER_OPTION_D_DONT_UPDATE" ||
+        arkenfox_updater_update_updater "$@" || return
+    arkenfox_updater_update_userjs || return
 }
 
-parse_options() {
-    OPTIND=1 # OPTIND must be manually reset between multiple calls to getopts.
-    OPTIONS_PARSED=0
-    # IMPORTANT! Make sure to initialize all options!
-    _H_HELP=
-    _R_READ_REMOTE_REPO_USERJS=
-    _D_DONT_UPDATE=
-    _U_UPDATER_SILENT=
-    PROFILE_PATH=
-    _L_LIST_FIREFOX_PROFILES=
-    _S_SILENT=
-    _C_COMPARE=
-    _B_BACKUP_KEEP_LATEST_ONLY=
-    _E_ESR=
-    _N_NO_OVERRIDES=
-    OVERRIDE=
-    _V_VIEW=
-    # TODO: Add -V option to display script version?
-    while getopts 'hrdup:lscbeno:v' opt; do
-        OPTIONS_PARSED=$((OPTIONS_PARSED + 1))
-        case $opt in
-            # General options
-            h) _H_HELP=1 ;;
-            r) _R_READ_REMOTE_REPO_USERJS=1 ;;
-            # Updater options
-            d) _D_DONT_UPDATE=1 ;;
-            u) _U_UPDATER_SILENT=1 ;;
-            # user.js options
-            p) PROFILE_PATH=$OPTARG ;;
-            l) _L_LIST_FIREFOX_PROFILES=1 ;;
-            s) _S_SILENT=1 ;;
-            c) _C_COMPARE=1 ;;
-            b) _B_BACKUP_KEEP_LATEST_ONLY=1 ;;
-            e) _E_ESR=1 ;;
-            n) _N_NO_OVERRIDES=1 ;;
-            o) OVERRIDE=$OPTARG ;;
-            v) _V_VIEW=1 ;;
-            \?)
-                usage >&2
-                return "$EX_USAGE"
-                ;;
-            :) return "$EX_USAGE" ;;
-        esac
-    done
-}
-
-usage() {
+arkenfox_updater_usage() {
     cat <<EOF
 
-${BLUE}Usage: $ARKENFOX_UPDATER_NAME [-h|-r]${RESET}
-${BLUE}       $ARKENFOX_UPDATER_NAME [UPDATER_OPTION]... [USERJS_OPTION]...${RESET}
+${_TPUT_AF_BLUE}Usage: $ARKENFOX_UPDATER_NAME [-h|-r]${_TPUT_SGR0}
+${_TPUT_AF_BLUE}       $ARKENFOX_UPDATER_NAME [UPDATER_OPTION]... [USERJS_OPTION]...${_TPUT_SGR0}
 
 General options:
     -h           Show this help message and exit.
@@ -533,7 +578,7 @@ user.js options:
     -b           Only keep one backup of each file.
     -e           Activate ESR related preferences.
     -n           Do not append any overrides, even if user-overrides.js exists.
-    -o OVERRIDE  Filename or path to overrides file (if different than user-overrides.js).
+    -o OVERRIDES Filename or path to overrides file (if different than user-overrides.js).
                  If used with -p, paths should be relative to PROFILE or absolute paths.
                  If given a directory, all files inside will be appended recursively.
                  You can pass multiple files or directories by passing a comma separated list.
@@ -545,42 +590,129 @@ user.js options:
 EOF
 }
 
-# We want to return from the parent function as well when an exclusive option
-# is present, but we have to differentiate an EX_OK status returned in this
-# case from those when the option is not present, so we do a translation to
-# EX__BASE, which we will revert back in the parent function.
-evaluate_exclusive_options() {
-    if [ "$OPTIONS_PARSED" -eq 1 ]; then
-        if is_option_present "$_H_HELP"; then
-            usage
-            return "$EX__BASE"
-        elif is_option_present "$_R_READ_REMOTE_REPO_USERJS"; then
-            download_and_open_userjs && return "$EX__BASE" || return
-        fi
+arkenfox_updater_parse_options() { # args: [options]
+    OPTIND=1                       # OPTIND must be manually reset between multiple calls to getopts.
+    _OPTIONS_PARSED=0
+    # IMPORTANT! Make sure to initialize all options!
+    _ARKENFOX_UPDATER_OPTION_H_HELP=
+    _ARKENFOX_UPDATER_OPTION_R_READ_ONLY=
+    _ARKENFOX_UPDATER_OPTION_D_DONT_UPDATE=
+    _ARKENFOX_UPDATER_OPTION_U_UPDATER_SILENT=
+    _ARKENFOX_UPDATER_OPTION_P_PROFILE_PATH=
+    _ARKENFOX_UPDATER_OPTION_L_LIST_FIREFOX_PROFILES=
+    _ARKENFOX_UPDATER_OPTION_S_SILENT=
+    _ARKENFOX_UPDATER_OPTION_C_COMPARE=
+    _ARKENFOX_UPDATER_OPTION_B_BACKUP_SINGLE=
+    _ARKENFOX_UPDATER_OPTION_E_ESR=
+    _ARKENFOX_UPDATER_OPTION_N_NO_OVERRIDES=
+    _ARKENFOX_UPDATER_OPTION_O_OVERRIDES=
+    _ARKENFOX_UPDATER_OPTION_V_VIEW=
+    while getopts 'hrdup:lscbeno:v' opt; do
+        _OPTIONS_PARSED=$((_OPTIONS_PARSED + 1))
+        case $opt in
+            # General options
+            h) _ARKENFOX_UPDATER_OPTION_H_HELP=1 ;;
+            r) _ARKENFOX_UPDATER_OPTION_R_READ_ONLY=1 ;;
+            # Updater options
+            d) _ARKENFOX_UPDATER_OPTION_D_DONT_UPDATE=1 ;;
+            u) _ARKENFOX_UPDATER_OPTION_U_UPDATER_SILENT=1 ;;
+            # user.js options
+            p) _ARKENFOX_UPDATER_OPTION_P_PROFILE_PATH=$OPTARG ;;
+            l) _ARKENFOX_UPDATER_OPTION_L_LIST_FIREFOX_PROFILES=1 ;;
+            s) _ARKENFOX_UPDATER_OPTION_S_SILENT=1 ;;
+            c) _ARKENFOX_UPDATER_OPTION_C_COMPARE=1 ;;
+            b) _ARKENFOX_UPDATER_OPTION_B_BACKUP_SINGLE=1 ;;
+            e) _ARKENFOX_UPDATER_OPTION_E_ESR=1 ;;
+            n) _ARKENFOX_UPDATER_OPTION_N_NO_OVERRIDES=1 ;;
+            o) _ARKENFOX_UPDATER_OPTION_O_OVERRIDES=$OPTARG ;;
+            v) _ARKENFOX_UPDATER_OPTION_V_VIEW=1 ;;
+            \?)
+                arkenfox_updater_usage >&2
+                return "${_EX_USAGE:?}"
+                ;;
+            :) return "${_EX_USAGE:?}" ;;
+        esac
+    done
+}
+
+arkenfox_updater_set_profile_path() {
+    if [ -n "$_ARKENFOX_UPDATER_OPTION_P_PROFILE_PATH" ]; then
+        _ARKENFOX_PROFILE_PATH=$_ARKENFOX_UPDATER_OPTION_P_PROFILE_PATH
+    elif is_option_present "$_ARKENFOX_UPDATER_OPTION_L_LIST_FIREFOX_PROFILES"; then
+        _ARKENFOX_PROFILE_PATH=$(arkenfox_firefox_profile_path_select) || return
     else
-        if is_option_present "$_H_HELP" ||
-            is_option_present "$_R_READ_REMOTE_REPO_USERJS"; then
-            usage >&2
-            return "$EX_USAGE"
-        fi
+        _ARKENFOX_PROFILE_PATH=$_ARKENFOX_UPDATER_RUN_DIR
+    fi
+    _ARKENFOX_PROFILE_PATH=$(realpath_ "$_ARKENFOX_PROFILE_PATH") &&
+        [ -w "$_ARKENFOX_PROFILE_PATH" ] &&
+        cd "$_ARKENFOX_PROFILE_PATH" || {
+        print_error 'The path to your Firefox profile' \
+            "('$_ARKENFOX_PROFILE_PATH') failed to be a directory to which" \
+            'the user has both write and execute access.'
+        return "${_EX_UNAVAILABLE:?}"
+    }
+    _ARKENFOX_PROFILE_USERJS="${_ARKENFOX_PROFILE_PATH%/}/user.js"
+    _ARKENFOX_PROFILE_USERJS_BACKUP_DIR="${_ARKENFOX_PROFILE_PATH%/}/userjs_backups"
+    _ARKENFOX_PROFILE_USERJS_DIFF_DIR="${_ARKENFOX_PROFILE_PATH%/}/userjs_diffs"
+}
+
+arkenfox_updater_check_nonroot() {
+    if [ "$(id -u)" -eq 0 ]; then
+        print_error "You shouldn't run this with elevated privileges" \
+            '(such as with doas/sudo).'
+        return "${_EX_USAGE:?}"
+    fi
+    root_owned_files=$(
+        find "${_ARKENFOX_PROFILE_USERJS:?}" \
+            "${_ARKENFOX_PROFILE_USERJS_BACKUP_DIR:?}/" \
+            "${_ARKENFOX_PROFILE_USERJS_DIFF_DIR:?}/" \
+            -user 0 -print 2>/dev/null
+    )
+    if [ -n "$root_owned_files" ]; then
+        # \b is a backspace to keep the trailing newlines
+        # from being stripped by command substitution.
+        print_error 'It looks like this script' \
+            'was previously run with elevated privileges.' \
+            'Please change ownership of the following files' \
+            'to your user and try again:' \
+            "$(printf '%s\n\b' '')$root_owned_files"
+        return "${_EX_CONFIG:?}"
     fi
 }
 
-download_and_open_userjs() {
-    master_userjs=$(
-        download_files \
-            'https://raw.githubusercontent.com/arkenfox/user.js/master/user.js'
-    ) || return
-    master_userjs_fixed="$master_userjs.js"
-    mv "$master_userjs" "$master_userjs_fixed" &&
-        print_ok "user.js was saved to temporary file $master_userjs_fixed." &&
-        popen "$master_userjs_fixed" ||
-        return
+arkenfox_updater_exec_general_options() {
+    if [ "$_OPTIONS_PARSED" -eq 1 ]; then
+        if is_option_present "$_ARKENFOX_UPDATER_OPTION_H_HELP"; then
+            arkenfox_updater_usage
+            return
+        elif is_option_present "$_ARKENFOX_UPDATER_OPTION_R_READ_ONLY"; then
+            arkenfox_updater_wget__open__userjs
+            return
+        fi
+    else
+        if is_option_present "$_ARKENFOX_UPDATER_OPTION_H_HELP" ||
+            is_option_present "$_ARKENFOX_UPDATER_OPTION_R_READ_ONLY"; then
+            arkenfox_updater_usage >&2
+            return "${_EX_USAGE:?}"
+        fi
+    fi
+    return "${_EX__BASE:?}"
 }
 
-show_banner() {
+arkenfox_updater_wget__open__userjs() {
+    master_userjs=$(
+        download_file \
+            'https://raw.githubusercontent.com/arkenfox/user.js/master/user.js'
+    ) &&
+        master_userjs_js="$master_userjs.js" &&
+        mv "$master_userjs" "$master_userjs_js" &&
+        print_ok "user.js was saved to the temporary file: $master_userjs_js." &&
+        open_ "$master_userjs_js"
+}
+
+arkenfox_updater_banner() {
     cat <<EOF
-${BBLUE}
+${_TPUT_AF_BLUE_BOLD}
 ##############################################################################
 ####                                                                      ####
 ####                           arkenfox user.js                           ####
@@ -589,257 +721,181 @@ ${BBLUE}
 ####             Updater for macOS and Linux by @overdodactyl             ####
 ####                                                                      ####
 ##############################################################################
-${RESET}
+${_TPUT_SGR0}
 
-Documentation for this script is available here:${CYAN}
+Documentation for this script is available here:${_TPUT_AF_CYAN}
 https://github.com/arkenfox/user.js/wiki/5.1-Updater-%5BOptions%5D#-maclinux
-${RESET}
+${_TPUT_SGR0}
 EOF
 }
 
-update_script() {
+arkenfox_updater_update_updater() { # args: [options]
+    # Here, we use _ARKENFOX_PROFILE_PATH/ARKENFOX_UPDATER_NAME
+    # instead of _ARKENFOX_UPDATER_RUN_PATH as the latter would be incorrect
+    # if the script is sourced.
+    : "${_ARKENFOX_PROFILE_PATH:?}"
+    arkenfox_updater="${_ARKENFOX_PROFILE_PATH%/}/${ARKENFOX_UPDATER_NAME:?}"
     master_updater=$(
-        download_files \
+        download_file \
             'https://raw.githubusercontent.com/arkenfox/user.js/master/updater.sh'
-    ) || return
-    local_version=$(script_version "$__ARKENFOX_UPDATER_PATH") &&
-        master_version=$(script_version "$master_updater") || return
-    # TODO: Consider just doing an equality check like in prefsCleaner.sh?
+    ) &&
+        local_version=$(arkenfox_script_version "$arkenfox_updater") &&
+        master_version=$(arkenfox_script_version "$master_updater") ||
+        return
     if [ "${local_version%%.*}" -eq "${master_version%%.*}" ] &&
         [ "${local_version#*.}" -lt "${master_version#*.}" ] ||
         [ "${local_version%%.*}" -lt "${master_version%%.*}" ]; then
-        if ! is_option_present "$_U_UPDATER_SILENT"; then
-            print_prompt 'There is a newer version of updater.sh available.'
-            print_confirm 'Update and execute? [y/N]'
+        if ! is_option_present "$_ARKENFOX_UPDATER_OPTION_U_UPDATER_SILENT"; then
+            print_info 'There is a newer version of updater.sh available. '
+            print_yN 'Update and execute?'
             read1 REPLY
-            printf '\n\n\n'
-            [ "$REPLY" = 'Y' ] || [ "$REPLY" = 'y' ] ||
-                return "$EX_OK"
+            printf '\n\n\n' >&2
+            [ "$REPLY" = 'Y' ] || [ "$REPLY" = 'y' ] || return "${_EX_OK:?}"
         fi
-        mv -f "$master_updater" "$__ARKENFOX_UPDATER_PATH" &&
-            chmod u+r+x "$__ARKENFOX_UPDATER_PATH" &&
-            "$__ARKENFOX_UPDATER_PATH" -d "$@" ||
-            return
+        mv -f "$master_updater" "$arkenfox_updater" &&
+            chmod u+r+x "$arkenfox_updater" || {
+            print_error 'Failed to update the arkenfox user.js updater' \
+                'and make it executable.'
+            return "${_EX_CANTCREAT:?}"
+        }
+        "$arkenfox_updater" -d "$@"
     fi
 }
 
-profile_path() {
-    if is_option_present "$_L_LIST_FIREFOX_PROFILES"; then
-        if [ "$(uname)" = 'Darwin' ]; then # macOS
-            profiles_ini="$HOME/Library/Application\ Support/Firefox/profiles.ini"
-        else
-            profiles_ini="$HOME/.mozilla/firefox/profiles.ini"
-        fi
-        [ -f "$profiles_ini" ] || {
-            print_error "No profiles.ini file found at $profiles_ini."
-            return "$EX_NOINPUT"
-        }
-        profile_path_from_ini "$profiles_ini" || return
-    else
-        printf '%s\n' "$__ARKENFOX_UPDATER_DIR"
-    fi
-}
-
-# https://kb.mozillazine.org/Profiles.ini_file
-profile_path_from_ini() { # arg: profiles.ini
-    profiles_ini=$1
-    selected_profile=$(select_profile "$profiles_ini") || return
-    path=$(
-        printf '%s\n' "$selected_profile" |
-            sed -n 's/^Path=\(.*\)$/\1/p'
-    )
-    if [ -z "$path" ]; then
-        print_error 'Failed to read the profile path in the INI file.'
-        return "$EX_DATAERR"
-    fi
-    is_relative=$(
-        printf '%s\n' "$selected_profile" |
-            sed -n 's/^IsRelative=\([01]\)$/\1/p'
-    )
-    if [ "$is_relative" = 1 ]; then
-        profiles_root_dir=$(dirname "$profiles_ini") &&
-            path="${profiles_root_dir%/}/$path" || {
-            print_error 'An unexpected error occurred' \
-                'while converting the profile path from relative to absolute.'
-            return "$EX_UNAVAILABLE"
-        }
-    fi
-    printf '%s\n' "$path"
-}
-
-select_profile() { # arg: profiles.ini
-    profile_section_regex='^[[]Profile[0123456789]{1,}[]]$'
-    # https://unix.stackexchange.com/a/786827
-    # shellcheck disable=SC2016 # Expressions don't expand in single quotes, use double quotes for that.
-    awk_program='
-        /^[[]/ {
-            section = substr($0, 2)
-        }
-
-        (section ~ /^Profile[0123456789]+/) {
-            print
-        }
-    '
-    while :; do
-        profiles=$(awk "$awk_program" "$1")
-        [ -n "$profiles" ] || {
-            print_error 'Failed to read the profile sections in the INI file.'
-            return "$EX_DATAERR"
-        }
-        if [ "$(printf '%s' "$profiles" | grep -Ec "$profile_section_regex")" -eq 1 ]; then
-            printf '%s\n' "$profiles" && return
-        else
-            display_profiles=$(
-                printf '%s\n\n' "$profiles" |
-                    grep -Ev -e '^IsRelative=' -e '^Default='
-                awk '
-                    /^[[]/ {
-                        section = substr($0, 2)
-                    }
-
-                    ((section ~ /^Install/) && /^Default=/) {
-                        print
-                    }
-                ' "$1"
-            )
-            cat >&2 <<EOF
-Profiles found:
-––––––––––––––––––––––––––––––
-$display_profiles
-––––––––––––––––––––––––––––––
-EOF
-            print_prompt 'Select the profile number' \
-                '(0 for Profile0, 1 for Profile1, etc):'
-            read -r REPLY
-            printf '\n\n'
-            case $REPLY in
-                0 | [1-9] | [1-9][0-9]*)
-                    # shellcheck disable=SC2016 # Expressions don't expand in single quotes, use double quotes for that.
-                    awk_program_modified='
-                        BEGIN {
-                            regex = "^Profile"select"[]]"
-                        }
-
-                        /^[[]/ {
-                            section = substr($0, 2)
-                        }
-
-                        section ~ regex {
-                            print
-                        }
-                    '
-                    selected_profile=$(
-                        printf '%s\n' "$profiles" |
-                            awk -v select="$REPLY" "$awk_program_modified"
-                    ) &&
-                        [ -n "$selected_profile" ] &&
-                        printf '%s\n' "$selected_profile" && return ||
-                        print_error 'Failed to extract configuration data' \
-                            "in the Profile$REPLY section."
-                    ;;
-                *) print_error 'Invalid selection!' ;;
-            esac
-        fi
-    done
-}
-
-update_userjs() {
+arkenfox_updater_update_userjs() {
     master_userjs=$(
-        download_files \
+        download_file \
             'https://raw.githubusercontent.com/arkenfox/user.js/master/user.js'
     ) || return
-    cat <<EOF
+    userjs="${_ARKENFOX_PROFILE_USERJS:?}"
+    cat >&2 <<EOF
 Please observe the following information:
-    Firefox profile:  ${YELLOW}$(pwd)${RESET}
-    Available online: ${YELLOW}$(userjs_version "$master_userjs")${RESET}
-    Currently using:  ${YELLOW}$(userjs_version user.js)${RESET}
+    Firefox profile:  ${_TPUT_AF_YELLOW}${_ARKENFOX_PROFILE_PATH:?}${_TPUT_SGR0}
+    Available online: ${_TPUT_AF_YELLOW}$(arkenfox_userjs_version "$master_userjs")${_TPUT_SGR0}
+    Currently using:  ${_TPUT_AF_YELLOW}$(arkenfox_userjs_version "$userjs")${_TPUT_SGR0}
 
 
 EOF
-    if ! is_option_present "$_S_SILENT"; then
-        print_prompt 'This script will update to the latest user.js file' \
-            'and append any custom configurations from user-overrides.js.'
-        print_confirm 'Continue? [y/N]'
+    if ! is_option_present "$_ARKENFOX_UPDATER_OPTION_S_SILENT"; then
+        print_info 'This script will update to the latest user.js file' \
+            'and apply any custom configurations' \
+            'from the supplied user-overrides.js files. '
+        print_yN 'Continue?'
         read1 REPLY
-        printf '\n\n'
+        printf '\n\n' >&2
         [ "$REPLY" = 'Y' ] || [ "$REPLY" = 'y' ] || {
             print_error 'Process aborted!'
-            return "$EX_FAIL"
+            return "${_EX_FAIL:?}"
         }
     fi
-    backup_dir='userjs_backups'
-    if is_option_present "$_B_BACKUP_KEEP_LATEST_ONLY"; then
-        userjs_backup="$backup_dir/user.js.backup"
-    else
-        userjs_backup="$backup_dir/user.js.backup.$(date '+%Y-%m-%d_%H%M')"
-    fi
-    # The -p option is used to suppress errors if directory exists.
-    mkdir -p "$backup_dir" &&
-        cp user.js "$userjs_backup" &&
-        mv "$master_userjs" user.js
-    print_ok 'user.js has been backed up and replaced with the latest version!'
-    if is_option_present "$_E_ESR"; then
-        sed -e 's/\/\* \(ESR[0-9]\{2,\}\.x still uses all.*\)/\/\/ \1/' \
-            user.js >user.js.tmp &&
-            mv user.js.tmp user.js
-        print_ok 'ESR related preferences have been activated!'
-    fi
-    if ! is_option_present "$_N_NO_OVERRIDES"; then
-        (   
-            IFS=,
-            set -f
-            # shellcheck disable=SC2086
-            append_overrides ${OVERRIDE:-'user-overrides.js'}
-        )
-    fi
-    if is_option_present "$_C_COMPARE"; then
-        diff_dir='userjs_diffs'
-        old_userjs_stripped=$(mktemp)
-        new_userjs_stripped=$(mktemp)
-        # TODO: Include old and new user.js version + ESR info in the filename?
-        diff_file="$diff_dir/diff_$(date +"%Y-%m-%d_%H%M").txt"
-        mkdir -p "$diff_dir" &&
-            remove_comments "$userjs_backup" >"$old_userjs_stripped" &&
-            remove_comments user.js >"$new_userjs_stripped"
-        diff=$(diff -b -U 0 "$old_userjs_stripped" "$new_userjs_stripped")
-        if [ -n "$diff" ]; then
-            printf '%s\n' "$diff" >"$diff_file"
-            print_ok "A diff file was created: $PWD/$diff_file."
+    userjs_backup=$(arkenfox_updater_backup_userjs "$userjs") &&
+        mv "$master_userjs" "$userjs" &&
+        print_ok 'user.js has been backed up' \
+            'and replaced with the latest version!' ||
+        return
+    arkenfox_updater_customize_userjs "$userjs" || return
+    if is_option_present "$_ARKENFOX_UPDATER_OPTION_C_COMPARE"; then
+        diff_file=$(arkenfox_updater_diff_userjs "$userjs" "$userjs_backup")
+        diff_status=$?
+        if [ -n "$diff_file" ]; then
+            [ "$diff_status" -eq "${_EX_FAIL:?}" ] ||
+                print_warning "Unexpected diff status: $diff_status."
+            print_ok "A diff file was created: $diff_file."
         else
+            [ "$diff_status" -eq "${_EX_OK:?}" ] || return "$diff_status"
             print_warning 'Your new user.js file appears to be identical.' \
                 'No diff file was created.'
-            ! is_option_present "$_B_BACKUP_KEEP_LATEST_ONLY" &&
+            is_option_present "$_ARKENFOX_UPDATER_OPTION_B_BACKUP_SINGLE" ||
                 rm "$userjs_backup"
         fi
     fi
-    is_option_present "$_V_VIEW" && popen user.js
+    is_option_present "$_ARKENFOX_UPDATER_OPTION_V_VIEW" && open_ "$userjs"
 }
 
-userjs_version() { # arg: user.js
-    [ -f "$1" ] && sed -n '4p' "$1" || echo 'Unknown'
+arkenfox_updater_backup_userjs() { # arg: user.js
+    backup_dir="${_ARKENFOX_PROFILE_USERJS_BACKUP_DIR:?}"
+    if is_option_present "$_ARKENFOX_UPDATER_OPTION_B_BACKUP_SINGLE"; then
+        userjs_backup="$backup_dir/user.js.backup"
+    else
+        userjs_backup="$backup_dir/user.js.backup.$(date +"%Y-%m-%d_%H%M")"
+    fi
+    # The -p option is used to suppress errors if directory exists.
+    mkdir -p "$backup_dir" &&
+        cp "$1" "$userjs_backup" &&
+        printf '%s\n' "$userjs_backup"
 }
 
-append_overrides() { # args: FILE...
-    unset IFS
-    set +f
+arkenfox_updater_customize_userjs() { # arg: user.js
+    if is_option_present "$_ARKENFOX_UPDATER_OPTION_E_ESR"; then
+        userjs_temp=$(mktemp_) &&
+            sed 's/\/\* \(ESR[0-9]\{2,\}\.x still uses all.*\)/\/\/ \1/' \
+                "$1" >"$userjs_temp" &&
+            mv "$userjs_temp" "$1" &&
+            print_ok 'ESR related preferences have been activated!' ||
+            return
+    fi
+    if ! is_option_present "$_ARKENFOX_UPDATER_OPTION_N_NO_OVERRIDES"; then
+        : "${_ARKENFOX_PROFILE_PATH:?}"
+        if [ -n "$_ARKENFOX_UPDATER_OPTION_O_OVERRIDES" ]; then
+            overrides=$_ARKENFOX_UPDATER_OPTION_O_OVERRIDES
+        else
+            overrides="${_ARKENFOX_PROFILE_PATH%/}/user-overrides.js"
+        fi
+        (
+            IFS=,
+            (set -o noglob 2>/dev/null) && set -o noglob || set -f || return
+            # shellcheck disable=SC2086 # Double quote to prevent globbing and word splitting.
+            arkenfox_updater_append_userjs_overrides $overrides
+        )
+    fi
+}
+
+arkenfox_updater_append_userjs_overrides() { # args: FILE...
+    userjs="${_ARKENFOX_PROFILE_USERJS:?}"
     while [ "$#" -gt 0 ]; do
-        if [ -f "$1" ]; then
-            echo >>user.js
-            cat "$1" >>user.js
-            print_ok "Override file appended: $1."
-        elif [ -d "$1" ]; then
-            for f in ./"$1"/*.js; do
-                [ "$f" = "./$1/*.js" ] && break # Custom failglob on.
-                append_overrides "$f"
+        override=$(realpath_ "$1") || return
+        if [ -f "$override" ]; then
+            echo >>"$userjs" &&
+                cat -- "$override" >>"$userjs" &&
+                print_ok "Override file appended: $override." ||
+                return
+        elif [ -d "$override" ]; then
+            (set +o noglob 2>/dev/null) && set +o noglob || set +f || return
+            for overridejs in "$override"/*.js; do
+                arkenfox_updater_append_userjs_overrides "$overridejs" ||
+                    return
             done
         else
-            print_warning "Could not find override file: $1."
+            print_warning "Could not find override file: $override."
         fi
         shift
     done
 }
 
-remove_comments() { # arg: FILE
+arkenfox_updater_diff_userjs() { # args: FILE1 FILE2
+    diff_dir="${_ARKENFOX_PROFILE_USERJS_DIFF_DIR:?}"
+    mkdir -p "$diff_dir" &&
+        new_userjs_stripped=$(mktemp_) &&
+        old_userjs_stripped=$(mktemp_) &&
+        remove_js_comments "$1" >"$new_userjs_stripped" &&
+        remove_js_comments "$2" >"$old_userjs_stripped" ||
+        return "${_EX_UNAVAILABLE:?}"
+    diff=$(diff -b -U 0 "$old_userjs_stripped" "$new_userjs_stripped")
+    diff_status=$?
+    if [ -n "$diff" ]; then
+        diff_file="$diff_dir/diff_$(date +"%Y-%m-%d_%H%M").txt"
+        printf '%s\n' "$diff" >"$diff_file" &&
+            printf '%s\n' "$diff_file" ||
+            return "${_EX_UNAVAILABLE:?}"
+    fi
+    return "$diff_status"
+}
+
+# This should ideally be placed immediately after read1,
+# but then it would break the JetBrain IDEs' syntax highlighting
+# and the functions outline in the structure tool window,
+# so it is defined last to minimize disruption.
+remove_js_comments() { # arg: FILE
     # Copied verbatim from the public domain sed script at
     # https://sed.sourceforge.io/grabbag/scripts/remccoms3.sed.
     # The best POSIX solution on the internet, though it does not handle files
@@ -859,8 +915,8 @@ should/appear
 EOF
     # The reference output is given by:
     # cpp -P -std=c99 -fpreprocessed -undef -dD "$1"
-    # The options "-Werror -Wfatal-errors" may be added to better mimick
-    # Firefox's parsing of user.js.
+    # The options "-Werror -Wfatal-errors" could also be added,
+    # which may mimic Firefox's parsing of user.js better.
     remccoms3=$(
         cat <<'EOF'
 #! /bin/sed -nf
@@ -961,32 +1017,34 @@ EOF
     )
     # Add LC_ALL=C to prevent indefinite loop in some cases:
     # https://stackoverflow.com/q/13061785/#comment93013794_13062074.
-    LC_ALL=C sed -ne "$remccoms3" "$1" |
+    LC_ALL=C sed -n "$remccoms3" "$1" |
         sed '/^[[:space:]]*$/d' # Remove blank lines.
 }
 
-init
+_arkenfox_init && _arkenfox_updater_init
 init_status=$?
 if [ "$init_status" -eq 0 ]; then
-    if [ "$__ARKENFOX_UPDATER_NAME" = "$ARKENFOX_UPDATER_NAME" ]; then
-        main "$@"
+    if [ "$_ARKENFOX_UPDATER_RUN_NAME" = "$ARKENFOX_UPDATER_NAME" ]; then
+        arkenfox_updater "$@"
     else
-        print_ok 'The arkenfox updater script has been successfully sourced.'
+        print_ok 'The arkenfox user.js updater script' \
+            'has been successfully sourced.'
         print_warning 'If this is not intentional,' \
             'you may have either made a typo in the shell commands,' \
             'or renamed this file without defining the environment variable' \
             'ARKENFOX_UPDATER_NAME to match the new name.' \
             "
 
-         Detected name of the run file: $__ARKENFOX_UPDATER_NAME
+         Detected name of the run file: $_ARKENFOX_UPDATER_RUN_NAME
          ARKENFOX_UPDATER_NAME: $ARKENFOX_UPDATER_NAME
-        
+
         " \
-            'Note that this is not the expected way' \
-            'to run the arkenfox updater script.' \
+            'Please note that this is not the expected way' \
+            'to run the arkenfox user.js updater script.' \
             'Dot sourcing support is experimental' \
             'and only provided for convenience.'
     fi
 else
-    (exit "$init_status") && true # https://stackoverflow.com/a/53454039
+    # '&& true' to avoid exiting the shell if the shell option errexit is set.
+    (exit "$init_status") && true
 fi
