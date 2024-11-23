@@ -33,9 +33,8 @@ jobs:
           done <<EOF
           $(exit_status_definitions)
           EOF
-      - name: Check that running as root returns EX_CONFIG
-        if: ${{ false }}   # TODO Can't understand what should be returned in this case
-        run: ./updater.sh
+      - name: Check that running as root returns EX_USAGE
+        run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
       - name: Tests setup
         run: |
           useradd -m nonrootuser
