@@ -24,6 +24,3 @@ Also be aware that the `arkenfox user.js` is made specifically for desktop Firef
 
 ### 🟥  acknowledgments
 Literally thousands of sources, references and suggestions. Many thanks, and much appreciated.
-
-
-# TODO Propose this: https://github.com/dylanaraps/pure-sh-bible/issues/54 (also fork this)
