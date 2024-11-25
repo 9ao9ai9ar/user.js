@@ -339,6 +339,17 @@ _arkenfox_init() {
     while IFS='=' read -r name code; do
         # Trim trailing whitespace characters. Needed for zsh and yash.
         code=${code%"${code##*[![:space:]]}"} # https://stackoverflow.com/a/3352015
+        # "When reporting the exit status with the special parameter '?',
+        # the shell shall report the full eight bits of exit status available."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
+        # "exit [n]: If n is specified, but its value is not between 0 and 255
+        # inclusively, the exit status is undefined."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
+        [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
+            printf '%s %s\n' 'Undefined exit status in the definition:' \
+                "$name=$code." >&2
+            return 70 # Internal software error.
+        }
         (eval readonly "$name=$code" 2>/dev/null) &&
             eval readonly "$name=$code" || {
             eval [ "\"\$$name\"" = "$code" ] &&
