@@ -16,7 +16,7 @@ jobs:
         run: ln -sf /usr/bin/${{ matrix.shell }} /bin/sh
       - name: Check exit status definitions
         run: |
-          . ./lib.sh
+          . ./updater.sh 2>/dev/null
 
           while IFS='=' read -r name code; do
               # "When reporting the exit status with the special parameter '?',
