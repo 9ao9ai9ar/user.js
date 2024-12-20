@@ -78,6 +78,45 @@ print_warning() { # args: [ARGUMENT]...
     printf '%s\n' "${_TPUT_AF_YELLOW}WARNING: $*${_TPUT_SGR0}" >&2
 }
 
+probe_fuser_() {
+    missing_fuser_() {
+        print_error 'Failed to find fuser, lsof, fstat or fdinfo on your system.'
+        return "${_EX_CNF:-127}"
+    }
+    if command -v fuser >/dev/null 2>&1; then
+        FUSER__IMPLEMENTATION='fuser'
+    elif command -v lsof >/dev/null 2>&1; then
+        FUSER__IMPLEMENTATION='lsof'
+    elif command -v fstat >/dev/null 2>&1; then
+        FUSER__IMPLEMENTATION='fstat'
+    elif command -v fdinfo >/dev/null 2>&1; then # Haiku
+        FUSER__IMPLEMENTATION='fdinfo'
+    else
+        FUSER__IMPLEMENTATION=
+        is_option_set "$PROBE_MISSING" && missing_fuser_
+    fi
+    fuser_() { # arg: FILE
+        result=
+        case $FUSER__IMPLEMENTATION in
+            'fuser') result=$(command fuser "$1" 2>/dev/null) || return ;;
+            'lsof')
+                # BusyBox lsof ignores all options and arguments.
+                result=$(command lsof -lnPt "$1") || return
+                ;;
+            'fstat')
+                # Begin after the header line.
+                result=$(command fstat "$1" | tail -n +2) || return
+                ;;
+            'fdinfo') result=$(command fdinfo -f "$1") || return ;;
+            *)
+                missing_fuser_
+                return
+                ;;
+        esac
+        [ -n "$result" ]
+    }
+}
+
 probe_mktemp_() {
     missing_mktemp_() {
         print_error 'Failed to find mktemp or m4 on your system.'
@@ -173,6 +212,23 @@ probe_realpath_() {
             'Substituting custom portable realpath implementation' \
             'for these missing utilities.'
     fi
+    # Both realpath and readlink -f as found on the BSDs are quite different
+    # from their Linux counterparts and even among themselves,
+    # instead behaving similarly to the POSIX realpath -e for the most part.
+    # The table below details the varying behaviors where the non-header cells
+    # note the exit status followed by any output in parentheses:
+    # |               | realpath nosuchfile | realpath nosuchtarget | readlink -f nosuchfile | readlink -f nosuchtarget |
+    # |---------------|---------------------|-----------------------|------------------------|--------------------------|
+    # | FreeBSD 14.2  | 1 (error message)   | 1 (error message)     | 1                      | 1 (fully resolved path)  |
+    # | OpenBSD 7.6   | 1 (error message)   | 1 (error message)     | 1 (error message)      | 1 (error message)        |
+    # | NetBSD 10.0   | 0                   | 0                     | 1                      | 1 (fully resolved path)  |
+    # | DragonFly 6.4 | 1 (error message)   | 1 (error message)     | 1                      | 1 (input path argument)  |
+    # It is also worth pointing out that the BusyBox (v1.37.0)
+    # realpath and readlink -f exit with status 1 without outputting
+    # the fully resolved path if the argument contains no slash characters
+    # and does not name a file in the current directory.
+    # The inconsistencies may prevent features making use of this function
+    # from working properly on some platforms.
     realpath_() { # args: FILE...
         if [ "$#" -le 0 ]; then
             echo 'realpath_: missing operand' >&2
@@ -184,15 +240,7 @@ probe_realpath_() {
                     'realpath') command realpath -- "$1" ;;
                     'readlink') command readlink -f -- "$1" ;;
                     'greadlink') command greadlink -f -- "$1" ;;
-                    *)
-                        # FIXME: Need to resolve basename target.
-                        [ -e "$1" ] && rreadlink "$1" || {
-                            dirname=$(dirname "$1") &&
-                                dirname_=$(rreadlink "$dirname") &&
-                                basename=$(basename "$1") &&
-                                printf '%s\n' "${dirname_%/}/$basename"
-                        }
-                        ;;
+                    *) rreadlink "$1" ;;
                 esac
                 status=$?
                 [ "$status" -eq "${_EX_OK:-0}" ] || realpath__status="$status"
@@ -203,35 +251,51 @@ probe_realpath_() {
     }
 }
 
+# https://mywiki.wooledge.org/BashFAQ/037
 probe_terminal() {
-    if [ -t 2 ] && tput setaf bold sgr0 >/dev/null 2>&1; then
-        _TPUT_AF_RED=$(tput setaf 1)
-        _TPUT_AF_BLUE=$(tput setaf 4)
-        _TPUT_AF_BLUE_BOLD=$(tput bold setaf 4)
-        _TPUT_AF_GREEN=$(tput setaf 2)
-        _TPUT_AF_YELLOW=$(tput setaf 3)
-        _TPUT_AF_CYAN=$(tput setaf 6)
-        _TPUT_SGR0=$(tput sgr0)
-    else
-        _TPUT_AF_RED=
-        _TPUT_AF_BLUE=
-        _TPUT_AF_BLUE_BOLD=
-        _TPUT_AF_GREEN=
-        _TPUT_AF_YELLOW=
-        _TPUT_AF_CYAN=
-        _TPUT_SGR0=
+    _TPUT_AF_RED=
+    _TPUT_AF_GREEN=
+    _TPUT_AF_YELLOW=
+    _TPUT_AF_BLUE=
+    _TPUT_AF_CYAN=
+    _TPUT_BOLD_AF_BLUE=
+    _TPUT_SGR0=
+    # Testing for multiple terminal capabilities at once is unreliable,
+    # and the non-POSIX option -S is not recognized by NetBSD's tput,
+    # which also requires a numerical argument after setaf/AF,
+    # so we test thus, trying both terminfo and termcap names just in case
+    # (see https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=214709):
+    if [ -t 2 ]; then
+        tput setaf 0 >/dev/null 2>&1 &&
+            tput bold >/dev/null 2>&1 &&
+            tput sgr0 >/dev/null 2>&1 ||
+            tput AF 0 >/dev/null 2>&1 &&
+            tput md >/dev/null 2>&1 &&
+            tput me >/dev/null 2>&1 ||
+            return "${_EX_OK:-0}" # No colors, but OK.
+        _TPUT_AF_RED=$(tput setaf 1 || tput AF 1)
+        _TPUT_AF_GREEN=$(tput setaf 2 || tput AF 2)
+        _TPUT_AF_YELLOW=$(tput setaf 3 || tput AF 3)
+        _TPUT_AF_BLUE=$(tput setaf 4 || tput AF 4)
+        _TPUT_AF_CYAN=$(tput setaf 6 || tput AF 6)
+        _TPUT_BOLD_AF_BLUE=$(tput bold setaf 4 || tput md AF 4)
+        _TPUT_SGR0=$(tput sgr0 || tput me)
     fi
 }
 
 probe_wget_() {
     missing_wget_() {
-        print_error 'Failed to find curl or wget on your system.'
+        print_error 'Failed to find curl, wget, fetch or ftp on your system.'
         return "${_EX_CNF:-127}"
     }
     if command -v curl >/dev/null 2>&1; then
         WGET__IMPLEMENTATION='curl'
     elif command -v wget >/dev/null 2>&1; then
         WGET__IMPLEMENTATION='wget'
+    elif command -v fetch >/dev/null 2>&1; then
+        WGET__IMPLEMENTATION='fetch'
+    elif command -v ftp >/dev/null 2>&1; then # tnftp
+        WGET__IMPLEMENTATION='ftp'
     else
         WGET__IMPLEMENTATION=
         is_option_set "$PROBE_MISSING" && missing_wget_
@@ -239,12 +303,12 @@ probe_wget_() {
     wget_() { # args: FILE URL
         case $WGET__IMPLEMENTATION in
             'curl')
-                http_code=$(
-                    command curl --max-redirs 3 -sfw '%{http_code}' -o "$1" "$2"
-                ) &&
+                http_code=$(command curl -sSfw '%{http_code}' -o "$1" "$2") &&
                     [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]
                 ;;
-            'wget') command wget --max-redirect 3 -qO "$1" "$2" ;;
+            'wget') command wget -O "$1" "$2" ;;
+            'fetch') command fetch -o "$1" "$2" ;;
+            'ftp') command ftp -o "$1" "$2" ;; # Progress meter to stdout.
             *) missing_wget_ ;;
         esac
     }
@@ -342,11 +406,11 @@ EOF
 
 # https://kb.mozillazine.org/Profile_folder_-_Firefox#Files
 # https://searchfox.org/mozilla-central/source/toolkit/profile/nsProfileLock.cpp
+# Function never warns of locked profile on DragonFly 6.4
+# due to non-functional fuser_ and realpath_.
 arkenfox_check_firefox_profile_lock() { # arg: DIRECTORY
     lock_file="${1%/}/.parentlock"
-    # FIXME: fuser is buggy, unmaintained and not preinstalled on FreeBSD.
-    # TODO: Add probe_fuser_ to select among fuser, lsof, fstat and sockstat.
-    while [ -f "$lock_file" ] && fuser "$lock_file" >/dev/null 2>&1 ||
+    while [ -f "$lock_file" ] && fuser_ "$lock_file" ||
         arkenfox_is_firefox_profile_symlink_locked "$1"; do
         print_warning 'This Firefox profile seems to be in use.' \
             'Close Firefox and try again.'
@@ -413,9 +477,11 @@ download_file() { # arg: URL
 ###############################################################################
 
 _arkenfox_prefs_cleaner_init() {
+    probe_missing=$PROBE_MISSING
     probe_terminal &&
         PROBE_MISSING=0 probe_wget_ &&
         PROBE_MISSING=0 probe_mktemp_ &&
+        PROBE_MISSING=$probe_missing probe_fuser_ &&
         probe_realpath_ ||
         return
     # IMPORTANT! ARKENFOX_PREFS_CLEANER_NAME must be synced to the name of this file!

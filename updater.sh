@@ -112,37 +112,45 @@ probe_mktemp_() {
 
 probe_open_() {
     missing_open_() {
-        print_error 'Failed to find xdg-open or open on your system.'
+        print_error 'Failed to find xdg-open, open or firefox on your system.'
         return "${_EX_CNF:-127}"
     }
     if command -v xdg-open >/dev/null 2>&1; then
         OPEN__IMPLEMENTATION='xdg-open'
     elif command -v open >/dev/null 2>&1; then
         OPEN__IMPLEMENTATION='open'
+    elif command -v firefox >/dev/null 2>&1; then
+        OPEN__IMPLEMENTATION='firefox'
     else
         OPEN__IMPLEMENTATION=
         is_option_set "$PROBE_MISSING" && missing_open_
     fi
     open_() { # args: FILE...
-        case $OPEN__IMPLEMENTATION in
-            'xdg-open')
-                if [ "$#" -le 0 ]; then
-                    command xdg-open
-                else
-                    open__status="${_EX_OK:-0}"
-                    while [ "$#" -gt 0 ]; do
-                        command xdg-open "$1"
-                        status=$?
-                        [ "$status" -eq "${_EX_OK:-0}" ] ||
-                            open__status="$status"
-                        shift
-                    done
-                    return "$open__status"
-                fi
-                ;;
-            'open') command open "$@" ;;
-            *) missing_open_ ;;
-        esac
+        if [ "$#" -le 0 ]; then
+            echo 'open_: missing operand' >&2
+            return "${_EX_USAGE:-2}"
+        else
+            open__status="${_EX_OK:-0}"
+            while [ "$#" -gt 0 ]; do
+                case $OPEN__IMPLEMENTATION in
+                    'xdg-open' | 'open')
+                        command "$OPEN__IMPLEMENTATION" "$1"
+                        ;;
+                    'firefox')
+                        command firefox "$@"
+                        return
+                        ;;
+                    *)
+                        missing_open_
+                        return
+                        ;;
+                esac
+                status=$?
+                [ "$status" -eq "${_EX_OK:-0}" ] || open__status="$status"
+                shift
+            done
+            return "$open__status"
+        fi
     }
 }
 
@@ -213,6 +221,23 @@ probe_realpath_() {
             'Substituting custom portable realpath implementation' \
             'for these missing utilities.'
     fi
+    # Both realpath and readlink -f as found on the BSDs are quite different
+    # from their Linux counterparts and even among themselves,
+    # instead behaving similarly to the POSIX realpath -e for the most part.
+    # The table below details the varying behaviors where the non-header cells
+    # note the exit status followed by any output in parentheses:
+    # |               | realpath nosuchfile | realpath nosuchtarget | readlink -f nosuchfile | readlink -f nosuchtarget |
+    # |---------------|---------------------|-----------------------|------------------------|--------------------------|
+    # | FreeBSD 14.2  | 1 (error message)   | 1 (error message)     | 1                      | 1 (fully resolved path)  |
+    # | OpenBSD 7.6   | 1 (error message)   | 1 (error message)     | 1 (error message)      | 1 (error message)        |
+    # | NetBSD 10.0   | 0                   | 0                     | 1                      | 1 (fully resolved path)  |
+    # | DragonFly 6.4 | 1 (error message)   | 1 (error message)     | 1                      | 1 (input path argument)  |
+    # It is also worth pointing out that the BusyBox (v1.37.0)
+    # realpath and readlink -f exit with status 1 without outputting
+    # the fully resolved path if the argument contains no slash characters
+    # and does not name a file in the current directory.
+    # The inconsistencies may prevent features making use of this function
+    # from working properly on some platforms.
     realpath_() { # args: FILE...
         if [ "$#" -le 0 ]; then
             echo 'realpath_: missing operand' >&2
@@ -224,15 +249,7 @@ probe_realpath_() {
                     'realpath') command realpath -- "$1" ;;
                     'readlink') command readlink -f -- "$1" ;;
                     'greadlink') command greadlink -f -- "$1" ;;
-                    *)
-                        # FIXME: Need to resolve basename target.
-                        [ -e "$1" ] && rreadlink "$1" || {
-                            dirname=$(dirname "$1") &&
-                                dirname_=$(rreadlink "$dirname") &&
-                                basename=$(basename "$1") &&
-                                printf '%s\n' "${dirname_%/}/$basename"
-                        }
-                        ;;
+                    *) rreadlink "$1" ;;
                 esac
                 status=$?
                 [ "$status" -eq "${_EX_OK:-0}" ] || realpath__status="$status"
@@ -243,35 +260,51 @@ probe_realpath_() {
     }
 }
 
+# https://mywiki.wooledge.org/BashFAQ/037
 probe_terminal() {
-    if [ -t 2 ] && tput setaf bold sgr0 >/dev/null 2>&1; then
-        _TPUT_AF_RED=$(tput setaf 1)
-        _TPUT_AF_BLUE=$(tput setaf 4)
-        _TPUT_AF_BLUE_BOLD=$(tput bold setaf 4)
-        _TPUT_AF_GREEN=$(tput setaf 2)
-        _TPUT_AF_YELLOW=$(tput setaf 3)
-        _TPUT_AF_CYAN=$(tput setaf 6)
-        _TPUT_SGR0=$(tput sgr0)
-    else
-        _TPUT_AF_RED=
-        _TPUT_AF_BLUE=
-        _TPUT_AF_BLUE_BOLD=
-        _TPUT_AF_GREEN=
-        _TPUT_AF_YELLOW=
-        _TPUT_AF_CYAN=
-        _TPUT_SGR0=
+    _TPUT_AF_RED=
+    _TPUT_AF_GREEN=
+    _TPUT_AF_YELLOW=
+    _TPUT_AF_BLUE=
+    _TPUT_AF_CYAN=
+    _TPUT_BOLD_AF_BLUE=
+    _TPUT_SGR0=
+    # Testing for multiple terminal capabilities at once is unreliable,
+    # and the non-POSIX option -S is not recognized by NetBSD's tput,
+    # which also requires a numerical argument after setaf/AF,
+    # so we test thus, trying both terminfo and termcap names just in case
+    # (see https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=214709):
+    if [ -t 2 ]; then
+        tput setaf 0 >/dev/null 2>&1 &&
+            tput bold >/dev/null 2>&1 &&
+            tput sgr0 >/dev/null 2>&1 ||
+            tput AF 0 >/dev/null 2>&1 &&
+            tput md >/dev/null 2>&1 &&
+            tput me >/dev/null 2>&1 ||
+            return "${_EX_OK:-0}" # No colors, but OK.
+        _TPUT_AF_RED=$(tput setaf 1 || tput AF 1)
+        _TPUT_AF_GREEN=$(tput setaf 2 || tput AF 2)
+        _TPUT_AF_YELLOW=$(tput setaf 3 || tput AF 3)
+        _TPUT_AF_BLUE=$(tput setaf 4 || tput AF 4)
+        _TPUT_AF_CYAN=$(tput setaf 6 || tput AF 6)
+        _TPUT_BOLD_AF_BLUE=$(tput bold setaf 4 || tput md AF 4)
+        _TPUT_SGR0=$(tput sgr0 || tput me)
     fi
 }
 
 probe_wget_() {
     missing_wget_() {
-        print_error 'Failed to find curl or wget on your system.'
+        print_error 'Failed to find curl, wget, fetch or ftp on your system.'
         return "${_EX_CNF:-127}"
     }
     if command -v curl >/dev/null 2>&1; then
         WGET__IMPLEMENTATION='curl'
     elif command -v wget >/dev/null 2>&1; then
         WGET__IMPLEMENTATION='wget'
+    elif command -v fetch >/dev/null 2>&1; then
+        WGET__IMPLEMENTATION='fetch'
+    elif command -v ftp >/dev/null 2>&1; then # tnftp
+        WGET__IMPLEMENTATION='ftp'
     else
         WGET__IMPLEMENTATION=
         is_option_set "$PROBE_MISSING" && missing_wget_
@@ -279,12 +312,12 @@ probe_wget_() {
     wget_() { # args: FILE URL
         case $WGET__IMPLEMENTATION in
             'curl')
-                http_code=$(
-                    command curl --max-redirs 3 -sfw '%{http_code}' -o "$1" "$2"
-                ) &&
+                http_code=$(command curl -sSfw '%{http_code}' -o "$1" "$2") &&
                     [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]
                 ;;
-            'wget') command wget --max-redirect 3 -qO "$1" "$2" ;;
+            'wget') command wget -O "$1" "$2" ;;
+            'fetch') command fetch -o "$1" "$2" ;;
+            'ftp') command ftp -o "$1" "$2" ;; # Progress meter to stdout.
             *) missing_wget_ ;;
         esac
     }
@@ -499,7 +532,7 @@ download_file() { # arg: URL
     # on any sane system, we leave it to the OS or the user to do the cleaning
     # themselves for simplicity's sake.
     output_temp=$(mktemp_) &&
-        wget_ "$output_temp" "$1" 2>/dev/null &&
+        wget_ "$output_temp" "$1" >/dev/null 2>&1 &&
         printf '%s\n' "$output_temp" || {
         print_error "Failed to download file from the URL: $1."
         return "${_EX_UNAVAILABLE:?}"
@@ -520,8 +553,8 @@ _arkenfox_updater_init() {
     probe_terminal &&
         PROBE_MISSING=1 probe_wget_ &&
         PROBE_MISSING=1 probe_mktemp_ &&
-        probe_realpath_ &&
-        PROBE_MISSING=$probe_missing probe_open_ ||
+        PROBE_MISSING=$probe_missing probe_open_ &&
+        probe_realpath_ ||
         return
     # IMPORTANT! ARKENFOX_UPDATER_NAME must be synced to the name of this file!
     # This is so that we may somewhat determine if the script is sourced or not
@@ -727,7 +760,7 @@ arkenfox_updater_wget__open__userjs() {
 
 arkenfox_updater_banner() {
     cat >&2 <<EOF
-${_TPUT_AF_BLUE_BOLD}
+${_TPUT_BOLD_AF_BLUE}
 ##############################################################################
 ####                                                                      ####
 ####                           arkenfox user.js                           ####
@@ -895,8 +928,8 @@ arkenfox_updater_diff_userjs() { # args: FILE1 FILE2
     mkdir -p "$diff_dir" &&
         new_userjs_stripped=$(mktemp_) &&
         old_userjs_stripped=$(mktemp_) &&
-        remove_js_comments "$1" >"$new_userjs_stripped" &&
-        remove_js_comments "$2" >"$old_userjs_stripped" ||
+        remove_userjs_comments "$1" >"$new_userjs_stripped" &&
+        remove_userjs_comments "$2" >"$old_userjs_stripped" ||
         return "${_EX_UNAVAILABLE:?}"
     diff=$(diff -b -U 0 "$old_userjs_stripped" "$new_userjs_stripped")
     diff_status=$?
@@ -909,15 +942,23 @@ arkenfox_updater_diff_userjs() { # args: FILE1 FILE2
     return "$diff_status"
 }
 
-# This should ideally be placed immediately after read1,
-# but then it would break the JetBrain IDEs' syntax highlighting
-# and the functions outline in the structure tool window,
-# so it is defined last to minimize disruption.
-remove_js_comments() { # arg: FILE
-    # Copied verbatim from the public domain sed script at
-    # https://sed.sourceforge.io/grabbag/scripts/remccoms3.sed.
-    # The best POSIX solution on the internet, though it does not handle files
-    # with syntax errors in C as well as emacs does, e.g.
+# TODO: Relocate to the end of read1 in a later commit.
+remove_userjs_comments() { # arg: FILE
+    # Copied near-verbatim from the public domain sed script at
+    # https://sed.sourceforge.io/grabbag/scripts/remccoms3.sed,
+    # patched to eliminate any unbalanced parenthesis or quotation mark in
+    # here-documents, comments, or case statement patterns,
+    # as pdksh mishandles them inside the $() form of command substitution
+    # (using the `` form is not an option as that introduces other errors):
+    # https://www.gnu.org/savannah-checkouts/gnu/autoconf/manual/html_node/Shell-Substitutions.html#index-_0024_0028commands_0029
+    # (see also https://unix.stackexchange.com/q/340923).
+    # The best POSIX solution on the internet, though it does not handle some
+    # edge cases as well as Emacs and cpp do; e.g. compare the output of
+    # `cpp -P -std=c99 -fpreprocessed -undef -dD "$1"`
+    # (the options "-Werror -Wfatal-errors" could also be added,
+    # which may mimic Firefox's parsing of user.js better)
+    # with that of `remove_userjs_comments "$1"`, where the content of
+    # the input file $1 is the text in the here-document below:
     : Unterminated multi-line strings test case <<'EOF'
 /* "not/here
 */"//"
@@ -931,19 +972,18 @@ should/appear
 /*string" /**/ shouldappear //*nothere*/
 /*/ nothere*/ should appear
 EOF
-    # The reference output is given by:
-    # cpp -P -std=c99 -fpreprocessed -undef -dD "$1"
-    # The options "-Werror -Wfatal-errors" could also be added,
-    # which may mimic Firefox's parsing of user.js better.
     remccoms3=$(
-        cat <<'EOF'
+        # Apparently, the redirection operator "<<", but not "<<-", here inside
+        # a command substitution breaks the JetBrains IDEs' syntax highlighting
+        # and the functions outline in the structure tool window.
+        cat <<-'EOF'
 #! /bin/sed -nf
 
 # Remove C and C++ comments, by Brian Hiles (brian_hiles@rocketmail.com)
 
 # Sped up (and bugfixed to some extent) by Paolo Bonzini (bonzini@gnu.org)
 # Works its way through the line, copying to hold space the text up to the
-# first special character (/, ", ').  The original version went exactly a
+# first special character (/, '"', "'").  The original version went exactly a
 # character at a time, hence the greater speed of this one.  But the concept
 # and especially the trick of building the line in hold space are entirely
 # merit of Brian.
