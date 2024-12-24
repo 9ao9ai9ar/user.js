@@ -262,13 +262,6 @@ probe_realpath_() {
 
 # https://mywiki.wooledge.org/BashFAQ/037
 probe_terminal() {
-    _TPUT_AF_RED=
-    _TPUT_AF_GREEN=
-    _TPUT_AF_YELLOW=
-    _TPUT_AF_BLUE=
-    _TPUT_AF_CYAN=
-    _TPUT_BOLD_AF_BLUE=
-    _TPUT_SGR0=
     # Testing for multiple terminal capabilities at once is unreliable,
     # and the non-POSIX option -S is not recognized by NetBSD's tput,
     # which also requires a numerical argument after setaf/AF,
@@ -277,19 +270,34 @@ probe_terminal() {
     if [ -t 2 ]; then
         tput setaf 0 >/dev/null 2>&1 &&
             tput bold >/dev/null 2>&1 &&
-            tput sgr0 >/dev/null 2>&1 ||
-            tput AF 0 >/dev/null 2>&1 &&
+            tput sgr0 >/dev/null 2>&1 &&
+            _TPUT_AF_RED=$(tput setaf 1 2>/dev/null) &&
+            _TPUT_AF_GREEN=$(tput setaf 2 2>/dev/null) &&
+            _TPUT_AF_YELLOW=$(tput setaf 3 2>/dev/null) &&
+            _TPUT_AF_BLUE=$(tput setaf 4 2>/dev/null) &&
+            _TPUT_AF_CYAN=$(tput setaf 6 2>/dev/null) &&
+            _TPUT_BOLD_AF_BLUE=$(tput bold setaf 4 2>/dev/null) &&
+            _TPUT_SGR0=$(tput sgr0 2>/dev/null) &&
+            return "${_EX_OK:-0}"
+        tput AF 0 >/dev/null 2>&1 &&
             tput md >/dev/null 2>&1 &&
-            tput me >/dev/null 2>&1 ||
-            return "${_EX_OK:-0}" # No colors, but OK.
-        _TPUT_AF_RED=$(tput setaf 1 || tput AF 1)
-        _TPUT_AF_GREEN=$(tput setaf 2 || tput AF 2)
-        _TPUT_AF_YELLOW=$(tput setaf 3 || tput AF 3)
-        _TPUT_AF_BLUE=$(tput setaf 4 || tput AF 4)
-        _TPUT_AF_CYAN=$(tput setaf 6 || tput AF 6)
-        _TPUT_BOLD_AF_BLUE=$(tput bold setaf 4 || tput md AF 4)
-        _TPUT_SGR0=$(tput sgr0 || tput me)
+            tput me >/dev/null 2>&1 &&
+            _TPUT_AF_RED=$(tput AF 1 2>/dev/null) &&
+            _TPUT_AF_GREEN=$(tput AF 2 2>/dev/null) &&
+            _TPUT_AF_YELLOW=$(tput AF 3 2>/dev/null) &&
+            _TPUT_AF_BLUE=$(tput AF 4 2>/dev/null) &&
+            _TPUT_AF_CYAN=$(tput AF 6 2>/dev/null) &&
+            _TPUT_BOLD_AF_BLUE=$(tput md AF 4 2>/dev/null) &&
+            _TPUT_SGR0=$(tput me 2>/dev/null) &&
+            return "${_EX_OK:-0}"
     fi
+    _TPUT_AF_RED=
+    _TPUT_AF_GREEN=
+    _TPUT_AF_YELLOW=
+    _TPUT_AF_BLUE=
+    _TPUT_AF_CYAN=
+    _TPUT_BOLD_AF_BLUE=
+    _TPUT_SGR0=
 }
 
 probe_wget_() {
@@ -973,9 +981,9 @@ should/appear
 /*/ nothere*/ should appear
 EOF
     remccoms3=$(
-        # Apparently, the redirection operator "<<", but not "<<-", here inside
-        # a command substitution breaks the JetBrains IDEs' syntax highlighting
-        # and the functions outline in the structure tool window.
+        # Apparently, the redirection operator "<<", but not "<<-", here
+        # inside a command substitution breaks the syntax highlighting and the
+        # functions outline in the structure tool window of JetBrains IDEs.
         cat <<-'EOF'
 #! /bin/sed -nf
 
@@ -1077,6 +1085,8 @@ EOF
     # https://stackoverflow.com/q/13061785/#comment93013794_13062074.
     sed -n "$remccoms3" "$1" |
         sed '/^[[:space:]]*$/d' # Remove blank lines.
+    # https://searchfox.org/mozilla-central/source/modules/libpref/parser/src/lib.rs
+    # TODO: In addition to C/C++ style comments, user.js also allows Python style comments.
 }
 
 _arkenfox_init && _arkenfox_updater_init
