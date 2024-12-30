@@ -39,6 +39,123 @@ esac
 # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_03_01.
 \unalias -a
 
+download_file() { # arg: URL
+    # The try-finally construct can be implemented as a series of trap commands.
+    # However, it is notoriously difficult to write them portably and reliably.
+    # Since mktemp_ creates temporary files that are periodically cleared
+    # on any sane system, we leave it to the OS or the user to do the cleaning
+    # themselves for simplicity's sake.
+    output_temp=$(mktemp_) &&
+        wget_ "$output_temp" "$1" >/dev/null 2>&1 &&
+        printf '%s\n' "$output_temp" || {
+        print_error "Failed to download file from the URL: $1."
+        return "${_EX_UNAVAILABLE:?}"
+    }
+}
+
+# Improved on the "secure shell script" example demonstrated in
+# https://pubs.opengroup.org/onlinepubs/9699919799/utilities/command.html#tag_20_22_17.
+init() {
+    # To prevent the accidental insertion of SGR commands in the grep output,
+    # even when not directed at a terminal, we explicitly set the three
+    # GREP_* environment variables:
+    \export LC_ALL=C GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se=' \
+        GREP_COLOR='0' GREP_OPTIONS= &&
+        # On Solaris 11.4, /usr/xpg4/bin/sh seems to be less POSIX compliant
+        # than /bin/sh (!), as it is the only shell among all tested that:
+        # 1. violated the rule "Unsetting a variable or function
+        # that was not previously set shall not be considered an error
+        # and does not cause the shell to abort."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_29_03
+        # 2. failed to parse the rreadlink function.
+        \unset -f awk basename cat cd chmod command cp cut \
+            date dd diff dirname echo find fuser getopts grep \
+            id ls m4 mkdir mv printf pwd read rm sed sort stty \
+            tput true umask unalias uname uniq wc &&
+        \unalias -a && {
+        # The pipefail option was added in POSIX.1-2024 (SUSv5),
+        # and has long been supported by most major POSIX-compatible shells,
+        # with the notable exceptions of dash and ksh88-based shells.
+        # There are some caveats to switching on this option though:
+        # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
+        # Note that we should test in a subshell first so that
+        # the non-interactive POSIX sh is never aborted by an error in set,
+        # a special built-in utility:
+        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
+        # "In POSIX sh, set option pipefail is undefined."
+        # shellcheck disable=SC3040
+        (set -o pipefail 2>/dev/null) && set -o pipefail
+        # Disable the nounset option as yash enables it by default,
+        # which is both inconvenient and against the POSIX recommendation.
+        # Use ShellCheck or ${parameter?word} to catch unset variables instead.
+        set +u
+    } && {
+        unset -f '[' 2>/dev/null || # [: invalid function name (some ksh).
+            command -V '[' | { ! command -p grep -q function; }
+    } && {
+        IFS=$(command -p printf '%b' ' \n\t') || unset -v IFS
+    } && {
+        standard_path=$(command -p getconf PATH 2>/dev/null) &&
+            export PATH="$standard_path:$PATH" ||
+            [ "$?" -eq 127 ] # getconf: command not found (Haiku).
+    } &&
+        umask 0077 && # cp/mv needs execute access to parent directories.
+        # Inspired by https://stackoverflow.com/q/1101957.
+        exit_status_definitions() {
+            cut -d'#' -f1 <<'EOF'
+_EX_OK=0           # Successful exit status.
+_EX_FAIL=1         # Failed exit status.
+_EX_USAGE=2        # Command line usage error.
+_EX__BASE=64       # Base value for error messages.
+_EX_DATAERR=65     # Data format error.
+_EX_NOINPUT=66     # Cannot open input.
+_EX_NOUSER=67      # Addressee unknown.
+_EX_NOHOST=68      # Host name unknown.
+_EX_UNAVAILABLE=69 # Service unavailable.
+_EX_SOFTWARE=70    # Internal software error.
+_EX_OSERR=71       # System error (e.g., can't fork).
+_EX_OSFILE=72      # Critical OS file missing.
+_EX_CANTCREAT=73   # Can't create (user) output file.
+_EX_IOERR=74       # Input/output error.
+_EX_TEMPFAIL=75    # Temp failure; user is invited to retry.
+_EX_PROTOCOL=76    # Remote error in protocol.
+_EX_NOPERM=77      # Permission denied.
+_EX_CONFIG=78      # Configuration error.
+_EX_NOEXEC=126     # A file to be executed was found, but it was not an executable utility.
+_EX_CNF=127        # A utility to be executed was not found.
+EOF
+        } &&
+            exit_status_definitions >/dev/null || {
+            status=$? || return
+            echo 'Failed to initialize the environment.' >&2
+            return "$status"
+        }
+    while IFS='=' read -r name code; do
+        code=$(trim "$code") # Needed for zsh and yash.
+        # "When reporting the exit status with the special parameter '?',
+        # the shell shall report the full eight bits of exit status available."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
+        # "exit [n]: If n is specified, but its value is not between 0 and 255
+        # inclusively, the exit status is undefined."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
+        is_integer "$code" && [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
+            printf '%s %s\n' 'Undefined exit status in the definition:' \
+                "$name=$code." >&2
+            return 70 # Internal software error.
+        }
+        (eval readonly "$name=$code" 2>/dev/null) &&
+            eval readonly "$name=$code" || {
+            eval [ "\"\$$name\"" = "$code" ] &&
+                continue # $name is already readonly and set to $code.
+            printf '%s %s\n' "Failed to make the exit status $name readonly." \
+                'Try again in a new shell environment?' >&2
+            return 75 # Temp failure.
+        }
+    done <<EOF
+$(exit_status_definitions)
+EOF
+}
+
 # Copied from https://unix.stackexchange.com/a/172109.
 is_integer() { # arg: [name]
     case $1 in
@@ -346,110 +463,6 @@ trim() { # arg: [name]
     printf '%s' "$var"
 }
 
-# TODO: Define in the collation order of function names in a later commit.
-# Improved on the "secure shell script" example demonstrated in
-# https://pubs.opengroup.org/onlinepubs/9699919799/utilities/command.html#tag_20_22_17.
-init() {
-    # To prevent the accidental insertion of SGR commands in the grep output,
-    # even when not directed at a terminal, we explicitly set the three
-    # GREP_* environment variables:
-    \export LC_ALL=C GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se=' \
-        GREP_COLOR='0' GREP_OPTIONS= &&
-        # On Solaris 11.4, /usr/xpg4/bin/sh seems to be less POSIX compliant
-        # than /bin/sh (!), as it is the only shell among all tested that:
-        # 1. violated the rule "Unsetting a variable or function
-        # that was not previously set shall not be considered an error
-        # and does not cause the shell to abort."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_29_03
-        # 2. failed to parse the rreadlink function.
-        \unset -f awk basename cat cd chmod command cp cut \
-            date dd diff dirname echo find fuser getopts grep \
-            id ls m4 mkdir mv printf pwd read rm sed sort stty \
-            tput true umask unalias uname uniq wc &&
-        \unalias -a && {
-        # The pipefail option was added in POSIX.1-2024 (SUSv5),
-        # and has long been supported by most major POSIX-compatible shells,
-        # with the notable exceptions of dash and ksh88-based shells.
-        # There are some caveats to switching on this option though:
-        # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
-        # Note that we should test in a subshell first so that
-        # the non-interactive POSIX sh is never aborted by an error in set,
-        # a special built-in utility:
-        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
-        # "In POSIX sh, set option pipefail is undefined."
-        # shellcheck disable=SC3040
-        (set -o pipefail 2>/dev/null) && set -o pipefail
-        # Disable the nounset option as yash enables it by default,
-        # which is both inconvenient and against the POSIX recommendation.
-        # Use ShellCheck or ${parameter?word} to catch unset variables instead.
-        set +u
-    } && {
-        unset -f '[' 2>/dev/null || # [: invalid function name (some ksh).
-            command -V '[' | { ! command -p grep -q function; }
-    } && {
-        IFS=$(command -p printf '%b' ' \n\t') || unset -v IFS
-    } && {
-        standard_path=$(command -p getconf PATH 2>/dev/null) &&
-            export PATH="$standard_path:$PATH" ||
-            [ "$?" -eq 127 ] # getconf: command not found (Haiku).
-    } &&
-        umask 0077 && # cp/mv needs execute access to parent directories.
-        # Inspired by https://stackoverflow.com/q/1101957.
-        exit_status_definitions() {
-            cut -d'#' -f1 <<'EOF'
-_EX_OK=0           # Successful exit status.
-_EX_FAIL=1         # Failed exit status.
-_EX_USAGE=2        # Command line usage error.
-_EX__BASE=64       # Base value for error messages.
-_EX_DATAERR=65     # Data format error.
-_EX_NOINPUT=66     # Cannot open input.
-_EX_NOUSER=67      # Addressee unknown.
-_EX_NOHOST=68      # Host name unknown.
-_EX_UNAVAILABLE=69 # Service unavailable.
-_EX_SOFTWARE=70    # Internal software error.
-_EX_OSERR=71       # System error (e.g., can't fork).
-_EX_OSFILE=72      # Critical OS file missing.
-_EX_CANTCREAT=73   # Can't create (user) output file.
-_EX_IOERR=74       # Input/output error.
-_EX_TEMPFAIL=75    # Temp failure; user is invited to retry.
-_EX_PROTOCOL=76    # Remote error in protocol.
-_EX_NOPERM=77      # Permission denied.
-_EX_CONFIG=78      # Configuration error.
-_EX_NOEXEC=126     # A file to be executed was found, but it was not an executable utility.
-_EX_CNF=127        # A utility to be executed was not found.
-EOF
-        } &&
-            exit_status_definitions >/dev/null || {
-            status=$? || return
-            echo 'Failed to initialize the environment.' >&2
-            return "$status"
-        }
-    while IFS='=' read -r name code; do
-        code=$(trim "$code") # Needed for zsh and yash.
-        # "When reporting the exit status with the special parameter '?',
-        # the shell shall report the full eight bits of exit status available."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
-        # "exit [n]: If n is specified, but its value is not between 0 and 255
-        # inclusively, the exit status is undefined."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
-        is_integer "$code" && [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
-            printf '%s %s\n' 'Undefined exit status in the definition:' \
-                "$name=$code." >&2
-            return 70 # Internal software error.
-        }
-        (eval readonly "$name=$code" 2>/dev/null) &&
-            eval readonly "$name=$code" || {
-            eval [ "\"\$$name\"" = "$code" ] &&
-                continue # $name is already readonly and set to $code.
-            printf '%s %s\n' "Failed to make the exit status $name readonly." \
-                'Try again in a new shell environment?' >&2
-            return 75 # Temp failure.
-        }
-    done <<EOF
-$(exit_status_definitions)
-EOF
-}
-
 # https://kb.mozillazine.org/Profile_folder_-_Firefox#Files
 # https://searchfox.org/mozilla-central/source/toolkit/profile/nsProfileLock.cpp
 arkenfox_check_firefox_profile_lock() { # arg: DIRECTORY
@@ -506,21 +519,6 @@ arkenfox_script_version() { # arg: {updater.sh|prefsCleaner.sh}
         printf '%s\n' "$version" || {
         print_error "Failed to determine the version of the script file: $1."
         return "${_EX_DATAERR:?}"
-    }
-}
-
-# TODO: Define in the collation order of function names in a later commit.
-download_file() { # arg: URL
-    # The try-finally construct can be implemented as a series of trap commands.
-    # However, it is notoriously difficult to write them portably and reliably.
-    # Since mktemp_ creates temporary files that are periodically cleared
-    # on any sane system, we leave it to the OS or the user to do the cleaning
-    # themselves for simplicity's sake.
-    output_temp=$(mktemp_) &&
-        wget_ "$output_temp" "$1" >/dev/null 2>&1 &&
-        printf '%s\n' "$output_temp" || {
-        print_error "Failed to download file from the URL: $1."
-        return "${_EX_UNAVAILABLE:?}"
     }
 }
 

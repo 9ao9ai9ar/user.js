@@ -39,6 +39,123 @@ esac
 # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_03_01.
 \unalias -a
 
+download_file() { # arg: URL
+    # The try-finally construct can be implemented as a series of trap commands.
+    # However, it is notoriously difficult to write them portably and reliably.
+    # Since mktemp_ creates temporary files that are periodically cleared
+    # on any sane system, we leave it to the OS or the user to do the cleaning
+    # themselves for simplicity's sake.
+    output_temp=$(mktemp_) &&
+        wget_ "$output_temp" "$1" >/dev/null 2>&1 &&
+        printf '%s\n' "$output_temp" || {
+        print_error "Failed to download file from the URL: $1."
+        return "${_EX_UNAVAILABLE:?}"
+    }
+}
+
+# Improved on the "secure shell script" example demonstrated in
+# https://pubs.opengroup.org/onlinepubs/9699919799/utilities/command.html#tag_20_22_17.
+init() {
+    # To prevent the accidental insertion of SGR commands in the grep output,
+    # even when not directed at a terminal, we explicitly set the three
+    # GREP_* environment variables:
+    \export LC_ALL=C GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se=' \
+        GREP_COLOR='0' GREP_OPTIONS= &&
+        # On Solaris 11.4, /usr/xpg4/bin/sh seems to be less POSIX compliant
+        # than /bin/sh (!), as it is the only shell among all tested that:
+        # 1. violated the rule "Unsetting a variable or function
+        # that was not previously set shall not be considered an error
+        # and does not cause the shell to abort."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_29_03
+        # 2. failed to parse the rreadlink function.
+        \unset -f awk basename cat cd chmod command cp cut \
+            date dd diff dirname echo find fuser getopts grep \
+            id ls m4 mkdir mv printf pwd read rm sed sort stty \
+            tput true umask unalias uname uniq wc &&
+        \unalias -a && {
+        # The pipefail option was added in POSIX.1-2024 (SUSv5),
+        # and has long been supported by most major POSIX-compatible shells,
+        # with the notable exceptions of dash and ksh88-based shells.
+        # There are some caveats to switching on this option though:
+        # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
+        # Note that we should test in a subshell first so that
+        # the non-interactive POSIX sh is never aborted by an error in set,
+        # a special built-in utility:
+        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
+        # "In POSIX sh, set option pipefail is undefined."
+        # shellcheck disable=SC3040
+        (set -o pipefail 2>/dev/null) && set -o pipefail
+        # Disable the nounset option as yash enables it by default,
+        # which is both inconvenient and against the POSIX recommendation.
+        # Use ShellCheck or ${parameter?word} to catch unset variables instead.
+        set +u
+    } && {
+        unset -f '[' 2>/dev/null || # [: invalid function name (some ksh).
+            command -V '[' | { ! command -p grep -q function; }
+    } && {
+        IFS=$(command -p printf '%b' ' \n\t') || unset -v IFS
+    } && {
+        standard_path=$(command -p getconf PATH 2>/dev/null) &&
+            export PATH="$standard_path:$PATH" ||
+            [ "$?" -eq 127 ] # getconf: command not found (Haiku).
+    } &&
+        umask 0077 && # cp/mv needs execute access to parent directories.
+        # Inspired by https://stackoverflow.com/q/1101957.
+        exit_status_definitions() {
+            cut -d'#' -f1 <<'EOF'
+_EX_OK=0           # Successful exit status.
+_EX_FAIL=1         # Failed exit status.
+_EX_USAGE=2        # Command line usage error.
+_EX__BASE=64       # Base value for error messages.
+_EX_DATAERR=65     # Data format error.
+_EX_NOINPUT=66     # Cannot open input.
+_EX_NOUSER=67      # Addressee unknown.
+_EX_NOHOST=68      # Host name unknown.
+_EX_UNAVAILABLE=69 # Service unavailable.
+_EX_SOFTWARE=70    # Internal software error.
+_EX_OSERR=71       # System error (e.g., can't fork).
+_EX_OSFILE=72      # Critical OS file missing.
+_EX_CANTCREAT=73   # Can't create (user) output file.
+_EX_IOERR=74       # Input/output error.
+_EX_TEMPFAIL=75    # Temp failure; user is invited to retry.
+_EX_PROTOCOL=76    # Remote error in protocol.
+_EX_NOPERM=77      # Permission denied.
+_EX_CONFIG=78      # Configuration error.
+_EX_NOEXEC=126     # A file to be executed was found, but it was not an executable utility.
+_EX_CNF=127        # A utility to be executed was not found.
+EOF
+        } &&
+            exit_status_definitions >/dev/null || {
+            status=$? || return
+            echo 'Failed to initialize the environment.' >&2
+            return "$status"
+        }
+    while IFS='=' read -r name code; do
+        code=$(trim "$code") # Needed for zsh and yash.
+        # "When reporting the exit status with the special parameter '?',
+        # the shell shall report the full eight bits of exit status available."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
+        # "exit [n]: If n is specified, but its value is not between 0 and 255
+        # inclusively, the exit status is undefined."
+        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
+        is_integer "$code" && [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
+            printf '%s %s\n' 'Undefined exit status in the definition:' \
+                "$name=$code." >&2
+            return 70 # Internal software error.
+        }
+        (eval readonly "$name=$code" 2>/dev/null) &&
+            eval readonly "$name=$code" || {
+            eval [ "\"\$$name\"" = "$code" ] &&
+                continue # $name is already readonly and set to $code.
+            printf '%s %s\n' "Failed to make the exit status $name readonly." \
+                'Try again in a new shell environment?' >&2
+            return 75 # Temp failure.
+        }
+    done <<EOF
+$(exit_status_definitions)
+EOF
+}
+
 # Copied from https://unix.stackexchange.com/a/172109.
 is_integer() { # arg: [name]
     case $1 in
@@ -351,108 +468,142 @@ trim() { # arg: [name]
     printf '%s' "$var"
 }
 
-# TODO: Define in the collation order of function names in a later commit.
-# Improved on the "secure shell script" example demonstrated in
-# https://pubs.opengroup.org/onlinepubs/9699919799/utilities/command.html#tag_20_22_17.
-init() {
-    # To prevent the accidental insertion of SGR commands in the grep output,
-    # even when not directed at a terminal, we explicitly set the three
-    # GREP_* environment variables:
-    \export LC_ALL=C GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se=' \
-        GREP_COLOR='0' GREP_OPTIONS= &&
-        # On Solaris 11.4, /usr/xpg4/bin/sh seems to be less POSIX compliant
-        # than /bin/sh (!), as it is the only shell among all tested that:
-        # 1. violated the rule "Unsetting a variable or function
-        # that was not previously set shall not be considered an error
-        # and does not cause the shell to abort."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_29_03
-        # 2. failed to parse the rreadlink function.
-        \unset -f awk basename cat cd chmod command cp cut \
-            date dd diff dirname echo find fuser getopts grep \
-            id ls m4 mkdir mv printf pwd read rm sed sort stty \
-            tput true umask unalias uname uniq wc &&
-        \unalias -a && {
-        # The pipefail option was added in POSIX.1-2024 (SUSv5),
-        # and has long been supported by most major POSIX-compatible shells,
-        # with the notable exceptions of dash and ksh88-based shells.
-        # There are some caveats to switching on this option though:
-        # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
-        # Note that we should test in a subshell first so that
-        # the non-interactive POSIX sh is never aborted by an error in set,
-        # a special built-in utility:
-        # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
-        # "In POSIX sh, set option pipefail is undefined."
-        # shellcheck disable=SC3040
-        (set -o pipefail 2>/dev/null) && set -o pipefail
-        # Disable the nounset option as yash enables it by default,
-        # which is both inconvenient and against the POSIX recommendation.
-        # Use ShellCheck or ${parameter?word} to catch unset variables instead.
-        set +u
-    } && {
-        unset -f '[' 2>/dev/null || # [: invalid function name (some ksh).
-            command -V '[' | { ! command -p grep -q function; }
-    } && {
-        IFS=$(command -p printf '%b' ' \n\t') || unset -v IFS
-    } && {
-        standard_path=$(command -p getconf PATH 2>/dev/null) &&
-            export PATH="$standard_path:$PATH" ||
-            [ "$?" -eq 127 ] # getconf: command not found (Haiku).
-    } &&
-        umask 0077 && # cp/mv needs execute access to parent directories.
-        # Inspired by https://stackoverflow.com/q/1101957.
-        exit_status_definitions() {
-            cut -d'#' -f1 <<'EOF'
-_EX_OK=0           # Successful exit status.
-_EX_FAIL=1         # Failed exit status.
-_EX_USAGE=2        # Command line usage error.
-_EX__BASE=64       # Base value for error messages.
-_EX_DATAERR=65     # Data format error.
-_EX_NOINPUT=66     # Cannot open input.
-_EX_NOUSER=67      # Addressee unknown.
-_EX_NOHOST=68      # Host name unknown.
-_EX_UNAVAILABLE=69 # Service unavailable.
-_EX_SOFTWARE=70    # Internal software error.
-_EX_OSERR=71       # System error (e.g., can't fork).
-_EX_OSFILE=72      # Critical OS file missing.
-_EX_CANTCREAT=73   # Can't create (user) output file.
-_EX_IOERR=74       # Input/output error.
-_EX_TEMPFAIL=75    # Temp failure; user is invited to retry.
-_EX_PROTOCOL=76    # Remote error in protocol.
-_EX_NOPERM=77      # Permission denied.
-_EX_CONFIG=78      # Configuration error.
-_EX_NOEXEC=126     # A file to be executed was found, but it was not an executable utility.
-_EX_CNF=127        # A utility to be executed was not found.
+arkenfox_remove_userjs_comments() { # arg: FILE
+    # Copied in full from the public domain sed script at
+    # https://sed.sourceforge.io/grabbag/scripts/remccoms3.sed,
+    # patched to eliminate any unbalanced parenthesis or quotation mark in
+    # here-documents, comments, or case statement patterns,
+    # as pdksh mishandles them inside the $() form of command substitution
+    # (using the `` form is not an option as that introduces other errors):
+    # https://www.gnu.org/savannah-checkouts/gnu/autoconf/manual/html_node/Shell-Substitutions.html#index-_0024_0028commands_0029
+    # (see also https://unix.stackexchange.com/q/340923).
+    # The best POSIX solution on the internet, though it does not handle some
+    # edge cases as well as Emacs and cpp do; e.g. compare the output of
+    # `cpp -P -std=c99 -fpreprocessed -undef -dD "$1"`
+    # (the options "-Werror -Wfatal-errors" could also be added,
+    # which may mimic Firefox's parsing of user.js better)
+    # with that of `arkenfox_remove_userjs_comments "$1"`, where the content of
+    # the input file $1 is the text in the here-document below:
+    : Unterminated multi-line strings test case <<'EOF'
+/* "not/here
+*/"//"
+// non "here /*
+should/appear
+// \
+nothere
+should/appear
+"a \" string with embedded comment /* // " /*nothere*/
+"multiline
+/*string" /**/ shouldappear //*nothere*/
+/*/ nothere*/ should appear
 EOF
-        } &&
-            exit_status_definitions >/dev/null || {
-            status=$? || return
-            echo 'Failed to initialize the environment.' >&2
-            return "$status"
-        }
-    while IFS='=' read -r name code; do
-        code=$(trim "$code") # Needed for zsh and yash.
-        # "When reporting the exit status with the special parameter '?',
-        # the shell shall report the full eight bits of exit status available."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
-        # "exit [n]: If n is specified, but its value is not between 0 and 255
-        # inclusively, the exit status is undefined."
-        # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
-        is_integer "$code" && [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
-            printf '%s %s\n' 'Undefined exit status in the definition:' \
-                "$name=$code." >&2
-            return 70 # Internal software error.
-        }
-        (eval readonly "$name=$code" 2>/dev/null) &&
-            eval readonly "$name=$code" || {
-            eval [ "\"\$$name\"" = "$code" ] &&
-                continue # $name is already readonly and set to $code.
-            printf '%s %s\n' "Failed to make the exit status $name readonly." \
-                'Try again in a new shell environment?' >&2
-            return 75 # Temp failure.
-        }
-    done <<EOF
-$(exit_status_definitions)
+    remccoms3=$(
+        # Apparently, the redirection operator "<<", but not "<<-", here
+        # inside a command substitution breaks the syntax highlighting and the
+        # functions outline in the structure tool window of JetBrains IDEs.
+        cat <<-'EOF'
+#! /bin/sed -nf
+
+# Remove C and C++ comments, by Brian Hiles (brian_hiles@rocketmail.com)
+
+# Sped up (and bugfixed to some extent) by Paolo Bonzini (bonzini@gnu.org)
+# Works its way through the line, copying to hold space the text up to the
+# first special character (/, '"', "'").  The original version went exactly a
+# character at a time, hence the greater speed of this one.  But the concept
+# and especially the trick of building the line in hold space are entirely
+# merit of Brian.
+
+:loop
+
+# This line is sufficient to remove C++ comments!
+/^\/\// s,.*,,
+
+/^$/{
+  x
+  p
+  n
+  b loop
+}
+/^"/{
+  :double
+  /^$/{
+    x
+    p
+    n
+    /^"/b break
+    b double
+  }
+
+  H
+  x
+  s,\n\(.[^\"]*\).*,\1,
+  x
+  s,.[^\"]*,,
+
+  /^"/b break
+  /^\\/{
+    H
+    x
+    s,\n\(.\).*,\1,
+    x
+    s/.//
+  }
+  b double
+}
+
+/^'/{
+  :single
+  /^$/{
+    x
+    p
+    n
+    /^'/b break
+    b single
+  }
+  H
+  x
+  s,\n\(.[^\']*\).*,\1,
+  x
+  s,.[^\']*,,
+
+  /^'/b break
+  /^\\/{
+    H
+    x
+    s,\n\(.\).*,\1,
+    x
+    s/.//
+  }
+  b single
+}
+
+/^\/\*/{
+  s/.//
+  :ccom
+  s,^.[^*]*,,
+  /^$/ n
+  /^\*\//{
+    s/..//
+    b loop
+  }
+  b ccom
+}
+
+:break
+H
+x
+s,\n\(.[^"'/]*\).*,\1,
+x
+s/.[^"'/]*//
+b loop
 EOF
+    ) &&
+        # Setting LC_ALL=C in init helps prevent an indefinite loop:
+        # https://stackoverflow.com/q/13061785/#comment93013794_13062074.
+        sed -n -- "$remccoms3" "$1" |
+        sed '/^[[:space:]]*$/d' # Remove blank lines.
+    # https://searchfox.org/mozilla-central/source/modules/libpref/parser/src/lib.rs
+    # TODO: In addition to C/C++ style comments, user.js also allows Python style comments.
 }
 
 # https://kb.mozillazine.org/Profiles.ini_file
@@ -567,21 +718,6 @@ arkenfox_script_version() { # arg: {updater.sh|prefsCleaner.sh}
 
 arkenfox_userjs_version() { # arg: user.js
     [ -f "$1" ] && sed -n -- '4p' "$1" || echo 'Unknown'
-}
-
-# TODO: Define in the collation order of function names in a later commit.
-download_file() { # arg: URL
-    # The try-finally construct can be implemented as a series of trap commands.
-    # However, it is notoriously difficult to write them portably and reliably.
-    # Since mktemp_ creates temporary files that are periodically cleared
-    # on any sane system, we leave it to the OS or the user to do the cleaning
-    # themselves for simplicity's sake.
-    output_temp=$(mktemp_) &&
-        wget_ "$output_temp" "$1" >/dev/null 2>&1 &&
-        printf '%s\n' "$output_temp" || {
-        print_error "Failed to download file from the URL: $1."
-        return "${_EX_UNAVAILABLE:?}"
-    }
 }
 
 # Restore the starting sh options.
@@ -998,8 +1134,8 @@ arkenfox_updater_diff_userjs() { # args: FILE1 FILE2
         mkdir -p -- "$diff_dir" &&
         old_userjs_stripped=$(mktemp_) &&
         new_userjs_stripped=$(mktemp_) &&
-        remove_userjs_comments "$2" >|"$old_userjs_stripped" &&
-        remove_userjs_comments "$1" >|"$new_userjs_stripped" ||
+        arkenfox_remove_userjs_comments "$2" >|"$old_userjs_stripped" &&
+        arkenfox_remove_userjs_comments "$1" >|"$new_userjs_stripped" ||
         return "${_EX_UNAVAILABLE:?}"
     diff=$(diff -b -U 0 -- "$old_userjs_stripped" "$new_userjs_stripped")
     diff_status=$? || return
@@ -1015,145 +1151,6 @@ arkenfox_updater_diff_userjs() { # args: FILE1 FILE2
             return "${_EX_UNAVAILABLE:?}"
     fi
     return "$diff_status"
-}
-
-# TODO: Relocate to the common utility functions section in a later commit.
-remove_userjs_comments() { # arg: FILE
-    # Copied in full from the public domain sed script at
-    # https://sed.sourceforge.io/grabbag/scripts/remccoms3.sed,
-    # patched to eliminate any unbalanced parenthesis or quotation mark in
-    # here-documents, comments, or case statement patterns,
-    # as pdksh mishandles them inside the $() form of command substitution
-    # (using the `` form is not an option as that introduces other errors):
-    # https://www.gnu.org/savannah-checkouts/gnu/autoconf/manual/html_node/Shell-Substitutions.html#index-_0024_0028commands_0029
-    # (see also https://unix.stackexchange.com/q/340923).
-    # The best POSIX solution on the internet, though it does not handle some
-    # edge cases as well as Emacs and cpp do; e.g. compare the output of
-    # `cpp -P -std=c99 -fpreprocessed -undef -dD "$1"`
-    # (the options "-Werror -Wfatal-errors" could also be added,
-    # which may mimic Firefox's parsing of user.js better)
-    # with that of `remove_userjs_comments "$1"`, where the content of
-    # the input file $1 is the text in the here-document below:
-    : Unterminated multi-line strings test case <<'EOF'
-/* "not/here
-*/"//"
-// non "here /*
-should/appear
-// \
-nothere
-should/appear
-"a \" string with embedded comment /* // " /*nothere*/
-"multiline
-/*string" /**/ shouldappear //*nothere*/
-/*/ nothere*/ should appear
-EOF
-    remccoms3=$(
-        # Apparently, the redirection operator "<<", but not "<<-", here
-        # inside a command substitution breaks the syntax highlighting and the
-        # functions outline in the structure tool window of JetBrains IDEs.
-        cat <<-'EOF'
-#! /bin/sed -nf
-
-# Remove C and C++ comments, by Brian Hiles (brian_hiles@rocketmail.com)
-
-# Sped up (and bugfixed to some extent) by Paolo Bonzini (bonzini@gnu.org)
-# Works its way through the line, copying to hold space the text up to the
-# first special character (/, '"', "'").  The original version went exactly a
-# character at a time, hence the greater speed of this one.  But the concept
-# and especially the trick of building the line in hold space are entirely
-# merit of Brian.
-
-:loop
-
-# This line is sufficient to remove C++ comments!
-/^\/\// s,.*,,
-
-/^$/{
-  x
-  p
-  n
-  b loop
-}
-/^"/{
-  :double
-  /^$/{
-    x
-    p
-    n
-    /^"/b break
-    b double
-  }
-
-  H
-  x
-  s,\n\(.[^\"]*\).*,\1,
-  x
-  s,.[^\"]*,,
-
-  /^"/b break
-  /^\\/{
-    H
-    x
-    s,\n\(.\).*,\1,
-    x
-    s/.//
-  }
-  b double
-}
-
-/^'/{
-  :single
-  /^$/{
-    x
-    p
-    n
-    /^'/b break
-    b single
-  }
-  H
-  x
-  s,\n\(.[^\']*\).*,\1,
-  x
-  s,.[^\']*,,
-
-  /^'/b break
-  /^\\/{
-    H
-    x
-    s,\n\(.\).*,\1,
-    x
-    s/.//
-  }
-  b single
-}
-
-/^\/\*/{
-  s/.//
-  :ccom
-  s,^.[^*]*,,
-  /^$/ n
-  /^\*\//{
-    s/..//
-    b loop
-  }
-  b ccom
-}
-
-:break
-H
-x
-s,\n\(.[^"'/]*\).*,\1,
-x
-s/.[^"'/]*//
-b loop
-EOF
-    ) &&
-        # Setting LC_ALL=C in init helps prevent an indefinite loop:
-        # https://stackoverflow.com/q/13061785/#comment93013794_13062074.
-        sed -n -- "$remccoms3" "$1" |
-        sed '/^[[:space:]]*$/d' # Remove blank lines.
-    # https://searchfox.org/mozilla-central/source/modules/libpref/parser/src/lib.rs
-    # TODO: In addition to C/C++ style comments, user.js also allows Python style comments.
 }
 
 # Restore the starting sh options.
