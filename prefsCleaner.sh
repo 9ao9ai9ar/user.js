@@ -9,8 +9,8 @@
 # This restriction is set by the function arkenfox_script_version.
 
 # Example advanced script usage:
-# $ yes | env PROBE_MISSING=1 ./prefsCleaner.sh >/dev/null 2>&1
-# $ TERM=dumb WGET__IMPLEMENTATION=wget . ./prefsCleaner.sh && arkenfox_prefs_cleaner
+# $ yes | env WGET__IMPLEMENTATION=wget ./prefsCleaner.sh >/dev/null 2>&1
+# $ TERM=dumb . ./prefsCleaner.sh && arkenfox_prefs_cleaner
 
 # This ShellCheck warning is just noise for those who know what they are doing:
 # "Note that A && B || C is not if-then-else. C may run when A is true."
@@ -23,55 +23,68 @@
 ###############################################################################
 
 # Save the starting sh options for later restoration.
-# Copied from https://unix.stackexchange.com/a/383581.
-_ARKENFOX_STARTING_SHOPTS=$(\set +o) || \return 2>/dev/null || \exit
-case $- in
-    *e*) _ARKENFOX_STARTING_SHOPTS="$_ARKENFOX_STARTING_SHOPTS; set -e" ;;
-    *) _ARKENFOX_STARTING_SHOPTS="$_ARKENFOX_STARTING_SHOPTS; set +e" ;;
-esac
-# Additionally, detect spoofing by external, readonly functions.
-\set -e || \return 2>/dev/null || \exit
-\export LC_ALL=C
-# Ensure no function of the same name is invoked before unalias the utility
-# (see https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_09_01_01),
-\unset -f unalias
-# which must be run asap because alias substitution occurs right before parsing:
-# https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_03_01.
-\unalias -a
+_ARKENFOX_STARTING_SHOPTS=$(\set +o) &&
+    # Workaround for bash (see https://unix.stackexchange.com/a/383581):
+    case $- in
+        *e*)
+            _ARKENFOX_STARTING_SHOPTS="$_ARKENFOX_STARTING_SHOPTS; set -o errexit"
+            ;;
+        *)
+            _ARKENFOX_STARTING_SHOPTS="$_ARKENFOX_STARTING_SHOPTS; set +o errexit"
+            ;;
+    esac &&
+    # Ensure no function of the same name is invoked before unalias the utility
+    # (see https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_09_01_01),
+    \unset -f unalias &&
+    # which must be run asap as alias substitution occurs right before parsing:
+    # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_03_01.
+    \unalias -a &&
+    # Detect spoofing by external, readonly functions.
+    set -o errexit ||
+    \return 2>/dev/null || \exit
 
 download_file() { # arg: URL
-    # The try-finally construct can be implemented as a series of trap commands.
+    # The try-finally construct can be implemented as a set of trap commands.
     # However, it is notoriously difficult to write them portably and reliably.
     # Since mktemp_ creates temporary files that are periodically cleared
-    # on any sane system, we leave it to the OS or the user to do the cleaning
-    # themselves for simplicity's sake.
-    output_temp=$(mktemp_) &&
-        wget_ "$output_temp" "$1" >/dev/null 2>&1 &&
-        printf '%s\n' "$output_temp" || {
+    # on any sane system, we leave it to the OS or the user
+    # to do the cleaning themselves for simplicity's sake.
+    temp=$(mktemp_) &&
+        wget_ "$temp" "$1" >/dev/null 2>&1 &&
+        printf '%s\n' "$temp" || {
         print_error "Failed to download file from the URL: $1."
         return "${_EX_UNAVAILABLE:?}"
     }
 }
 
-# Improved on the "secure shell script" example demonstrated in
+# An improvement on the "secure shell script" example demonstrated in
 # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/command.html#tag_20_22_17.
 init() {
-    # To prevent the accidental insertion of SGR commands in the grep output,
-    # even when not directed at a terminal, we explicitly set the three
-    # GREP_* environment variables:
-    \export LC_ALL=C GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se=' \
-        GREP_COLOR='0' GREP_OPTIONS= &&
-        # On Solaris 11.4, /usr/xpg4/bin/sh seems to be less POSIX compliant
-        # than /bin/sh (!), as it is the only shell among all tested that:
-        # 1. violated the rule "Unsetting a variable or function
-        # that was not previously set shall not be considered an error
-        # and does not cause the shell to abort."
+    LC_ALL=C &&
+        # To prevent the accidental insertion of SGR commands in grep's output,
+        # even when not directed at a terminal, we explicitly set
+        # the following three environment variables:
+        GREP_COLORS='mt=:ms=:mc=:sl=:cx=:fn=:ln=:bn=:se=' &&
+        GREP_COLOR='0' &&
+        GREP_OPTIONS= &&
+        \export LC_ALL GREP_COLORS GREP_COLOR GREP_OPTIONS &&
+        # Unset all functions whose name is the same as any of
+        # the standard utilities used in the arkenfox scripts.
+        # If a function by that name is not already defined, a >0 exit status
+        # may be returned in some ksh88 derivatives like the pdksh and XPG4 sh.
+        # While this is technically not against the requirement
+        # "Unsetting a variable or function that was not previously set shall
+        # not be considered an error and does not cause the shell to abort."
         # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_29_03
-        # 2. failed to parse the rreadlink function.
+        # it runs counter to what most people perceive to be
+        # the correct behavior and what most shells actually do in such case.
         \unset -f awk basename cat cd chmod command cp cut \
             date dd diff dirname echo find fuser getopts grep \
             id ls m4 mkdir mv printf pwd read rm sed sort stty \
-            tput true umask unalias uname uniq wc &&
+            tput umask unalias uname uniq wc &&
+        # It is already too late for running the unalias command,
+        # but might still be useful in the case the script is dot sourced,
+        # acting as a reset mechanism.
         \unalias -a && {
         # The pipefail option was added in POSIX.1-2024 (SUSv5),
         # and has long been supported by most major POSIX-compatible shells,
@@ -79,7 +92,7 @@ init() {
         # There are some caveats to switching on this option though:
         # https://mywiki.wooledge.org/BashPitfalls#set_-euo_pipefail.
         # Note that we should test in a subshell first so that
-        # the non-interactive POSIX sh is never aborted by an error in set,
+        # the non-interactive shell is not aborted by an error in set,
         # a special built-in utility:
         # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_01.
         # "In POSIX sh, set option pipefail is undefined."
@@ -88,18 +101,19 @@ init() {
         # Disable the nounset option as yash enables it by default,
         # which is both inconvenient and against the POSIX recommendation.
         # Use ShellCheck or ${parameter?word} to catch unset variables instead.
-        set +u
+        set +o nounset
     } && {
-        unset -f '[' 2>/dev/null || # [: invalid function name (some ksh).
+        unset -f '[' 2>/dev/null || # This triggers an error in some ksh88.
             command -V '[' | { ! command -p grep -q function; }
     } && {
         IFS=$(command -p printf '%b' ' \n\t') || unset -v IFS
     } && {
-        standard_path=$(command -p getconf PATH 2>/dev/null) &&
-            export PATH="$standard_path:$PATH" ||
+        path=$(command -p getconf PATH 2>/dev/null) &&
+            PATH="$path:$PATH" &&
+            export PATH ||
             [ "$?" -eq 127 ] # getconf: command not found (Haiku).
     } &&
-        umask 0077 && # cp/mv needs execute access to parent directories.
+        umask 0077 && # cp/mv need execute access to parent directories.
         # Inspired by https://stackoverflow.com/q/1101957.
         exit_status_definitions() {
             cut -d'#' -f1 <<'EOF'
@@ -131,23 +145,28 @@ EOF
             return "$status"
         }
     while IFS='=' read -r name code; do
-        code=$(trim "$code") # Needed for zsh and yash.
+        code=$(trim "$code") || return
         # "When reporting the exit status with the special parameter '?',
         # the shell shall report the full eight bits of exit status available."
         # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_08_02
-        # "exit [n]: If n is specified, but its value is not between 0 and 255
-        # inclusively, the exit status is undefined."
+        # "exit [n]: If n is specified, but its value is not between
+        # 0 and 255 inclusively, the exit status is undefined."
         # ―https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_21
         is_integer "$code" && [ "$code" -ge 0 ] && [ "$code" -le 255 ] || {
             printf '%s %s\n' 'Undefined exit status in the definition:' \
                 "$name=$code." >&2
             return 70 # Internal software error.
         }
-        (eval readonly "$name=$code" 2>/dev/null) &&
-            eval readonly "$name=$code" || {
+        (
+            eval "$name=$code" 2>/dev/null &&
+                eval readonly "$name" 2>/dev/null
+        ) &&
+            eval "$name=$code" &&
+            eval readonly "$name" || {
             eval [ "\"\$$name\"" = "$code" ] &&
                 continue # $name is already readonly and set to $code.
-            printf '%s %s\n' "Failed to make the exit status $name readonly." \
+            printf '%s %s\n' \
+                "Failed to assign $code to $name and make $name readonly." \
                 'Try again in a new shell environment?' >&2
             return 75 # Temp failure.
         }
@@ -168,17 +187,17 @@ is_option_set() { # arg: [name]
     [ "${1:-0}" != 0 ] && [ "$1" != false ]
 }
 
-missing_utilities() { #args: [name]...
-    print_error "Failed to find the following utilities on your system: $*."
-    return "${_EX_CNF:?}"
-}
-
 print_error() { # args: [ARGUMENT]...
     printf '%s\n' "${_TPUT_AF_RED}ERROR: $*${_TPUT_SGR0}" >&2
 }
 
 print_info() { # args: [ARGUMENT]...
     printf '%b' "$*" >&2
+}
+
+print_missing() { #args: [ARGUMENT]...
+    print_error "Failed to find the following utilities on your system: $*."
+    return "${_EX_CNF:?}"
 }
 
 print_ok() { # args: [ARGUMENT]...
@@ -193,46 +212,51 @@ print_yN() { # args: [ARGUMENT]...
     printf '%s' "${_TPUT_AF_RED}$* [y/N]${_TPUT_SGR0} " >&2
 }
 
-probe_fuser_() {
-    fuser_() { # arg: FILE
-        result=
+probe_fuser_() { # arg: [IMPLEMENTATION]
+    fuser_() {   # arg: FILE
+        output= || return
         case $FUSER__IMPLEMENTATION in
-            fuser) result=$(command fuser -- "$1" 2>/dev/null) || return ;;
+            fuser)
+                # Do not add --, as on Ubuntu and Arch Linux at least,
+                # fuser does not conform to the XBD Utility Syntax Guidelines.
+                output=$(command fuser "$1" 2>/dev/null)
+                ;;
             lsof)
                 # BusyBox lsof ignores all options and arguments.
-                result=$(command lsof -lnPt -- "$1") || return
+                output=$(command lsof -lnPt -- "$1")
                 ;;
             fstat)
                 # Begin after the header line.
-                # Seems non-functional on DragonFly 6.4
-                # if used with an argument.
-                result=$(command fstat -- "$1" | tail -n +2) || return
+                # Not functional on DragonFly 6.4 if used with an argument.
+                output=$(command fstat -- "$1" | tail -n +2)
                 ;;
             fdinfo) # Haiku
-                result=$(command fdinfo -f -- "$1") || return
+                # Do not add --, as fdinfo does not conform to the
+                # XBD Utility Syntax Guidelines.
+                output=$(command fdinfo -f "$1")
                 ;;
             *)
-                missing_utilities "$FUSER__IMPLEMENTATION"
+                print_missing fuser lsof fstat fdinfo
                 return
                 ;;
-        esac
-        [ -n "$result" ]
+        esac && [ -n "$output" ]
     } || return
-    set -- fuser lsof fstat fdinfo
+    FUSER__IMPLEMENTATION=$1 && util= && set -- fuser lsof fstat fdinfo || return
     for util in "$@"; do
         [ "${FUSER__IMPLEMENTATION:-"$util"}" = "$util" ] || continue
         if command -v -- "$util" >/dev/null; then
             FUSER__IMPLEMENTATION=$util
             return
+        else
+            [ "$FUSER__IMPLEMENTATION" = "$util" ] || continue
+            print_missing "$util"
+            return
         fi
     done
-    FUSER__IMPLEMENTATION= || return
-    # "Possible misspelling: PROBE_MISSING may not be assigned. Did you mean probe_missing?"
-    # shellcheck disable=SC2153
-    ! is_option_set "$PROBE_MISSING" || missing_utilities "$@"
+    print_missing "$@"
 }
 
-probe_mktemp_() {
+probe_mktemp_() { # arg: [IMPLEMENTATION]
     mktemp_() {
         case $MKTEMP__IMPLEMENTATION in
             mktemp) command mktemp ;;
@@ -241,60 +265,59 @@ probe_mktemp_() {
                 echo 'mkstemp(template)' |
                     m4 -D template="${TMPDIR:-/tmp}/baseXXXXXX"
                 ;;
-            *) missing_utilities "$MKTEMP__IMPLEMENTATION" ;;
+            *) print_missing mktemp m4 ;;
         esac
     } || return
-    set -- mktemp m4
+    MKTEMP__IMPLEMENTATION=$1 && util= && set -- mktemp m4 || return
     for util in "$@"; do
         [ "${MKTEMP__IMPLEMENTATION:-"$util"}" = "$util" ] || continue
         if command -v -- "$util" >/dev/null; then
             MKTEMP__IMPLEMENTATION=$util
             return
+        else
+            [ "$MKTEMP__IMPLEMENTATION" = "$util" ] || continue
+            print_missing "$util"
+            return
         fi
     done
-    MKTEMP__IMPLEMENTATION= || return
-    ! is_option_set "$PROBE_MISSING" || missing_utilities "$@"
+    print_missing "$@"
 }
 
-probe_realpath_() {
+probe_realpath_() { # arg: [IMPLEMENTATION]
     # Adjusted from https://stackoverflow.com/a/29835459
     # to match the behavior of the POSIX realpath -E:
     # https://pubs.opengroup.org/onlinepubs/9799919799/utilities/realpath.html.
     # Execute in a subshell to localize variables and the effect of cd.
     rreadlink() ( # arg: FILE
-        target=$1 &&
-            directory_name= &&
-            file_name= &&
-            target_directory= &&
-            CDPATH= ||
-            return
+        target=$1 && dir_name= && base_name= && target_dir= && CDPATH= || return
         while :; do
-            directory_name=$(dirname -- "$target") || return
-            [ -L "$target" ] || [ -e "$target" ] || [ -e "$directory_name" ] || {
-                print_error "'$target' does not exist."
+            dir_name=$(dirname -- "$target") || return
+            [ -L "$target" ] || [ -e "$target" ] || [ -e "$dir_name" ] || {
+                print_error "rreadlink: $target: No such file or directory"
                 return "${_EX_FAIL:?}"
             }
-            cd -- "$directory_name" || return
-            file_name=$(basename -- "$target") || return
-            [ "$file_name" = '/' ] && file_name='' # `basename /` returns '/'.
-            if [ -L "$file_name" ]; then
-                target=$(ls -l -- "$file_name") || return
-                target=${target#* -> }
+            cd -- "$dir_name" &&
+                base_name=$(basename -- "$target") || return
+            [ "$base_name" = '/' ] && base_name= # `basename /` returns '/'.
+            if [ -L "$base_name" ]; then
+                target=$(ls -l -- "$base_name") &&
+                    target=${target#*' -> '} ||
+                    return
                 continue
             fi
             break
         done
-        target_directory=$(pwd -P) || return
-        if [ "$file_name" = '.' ]; then
-            printf '%s\n' "${target_directory%/}"
-        elif [ "$file_name" = '..' ]; then
-            printf '%s\n' "$(dirname -- "${target_directory}")"
+        target_dir=$(pwd -P) || return
+        if [ "$base_name" = '.' ]; then
+            printf '%s\n' "${target_dir%/}"
+        elif [ "$base_name" = '..' ]; then
+            printf '%s\n' "$(dirname -- "${target_dir}")"
         else
-            printf '%s\n' "${target_directory%/}/$file_name"
+            printf '%s\n' "${target_dir%/}/$base_name"
         fi
     ) || return
     realpath_() { # args: FILE...
-        if [ "$#" -le 0 ]; then
+        if [ "$#" -eq 0 ]; then
             echo 'realpath_: missing operand' >&2
             return "${_EX_USAGE:?}"
         else
@@ -313,6 +336,7 @@ probe_realpath_() {
             return "$return_status"
         fi
     } || return
+    REALPATH__IMPLEMENTATION=$1 && util= || return
     # Both realpath and readlink -f as found on the BSDs are quite different
     # from their Linux counterparts and even among themselves,
     # instead behaving similarly to the POSIX realpath -e for the most part.
@@ -328,20 +352,26 @@ probe_realpath_() {
     # realpath and readlink -f exit with status 1 without outputting
     # the fully resolved path if the argument contains no slash characters
     # and does not name a file in the current directory.
-    case $(uname) in
-        NetBSD) : ;;      # NetBSD realpath works as intended.
-        *BSD | DragonFly) # Other BSDs need to switch to rreadlink.
-            REALPATH__IMPLEMENTATION=${REALPATH__IMPLEMENTATION:-rreadlink} ||
-                return
-            ;;
-    esac
-    for util in realpath readlink greadlink; do
+    kernel=$(uname) &&
+        case $kernel in
+            NetBSD) : ;;      # NetBSD realpath works as intended.
+            *BSD | DragonFly) # Other BSDs need to switch to rreadlink.
+                REALPATH__IMPLEMENTATION=${REALPATH__IMPLEMENTATION:-rreadlink}
+                ;;
+        esac ||
+        return
+    set -- realpath readlink greadlink || return
+    for util in "$@"; do
         [ "${REALPATH__IMPLEMENTATION:-"$util"}" = "$util" ] || continue
         if case $util in
             readlink | greadlink) command "$util" -f -- . >/dev/null 2>&1 ;;
             *) command "$util" -- . >/dev/null 2>&1 ;;
         esac then
             REALPATH__IMPLEMENTATION=$util
+            return
+        else
+            [ "$REALPATH__IMPLEMENTATION" = "$util" ] || continue
+            print_missing "$util"
             return
         fi
     done
@@ -379,8 +409,7 @@ probe_terminal() {
             _TPUT_SGR0=$(tput me) &&
             return
     fi
-    : &&
-        _TPUT_AF_RED= &&
+    _TPUT_AF_RED= &&
         _TPUT_AF_GREEN= &&
         _TPUT_AF_YELLOW= &&
         _TPUT_AF_BLUE= &&
@@ -389,8 +418,8 @@ probe_terminal() {
         _TPUT_SGR0=
 }
 
-probe_wget_() {
-    wget_() { # args: FILE URL
+probe_wget_() { # arg: [IMPLEMENTATION]
+    wget_() {   # args: FILE URL
         case $WGET__IMPLEMENTATION in
             curl)
                 http_code=$(
@@ -403,19 +432,22 @@ probe_wget_() {
             wget) command wget -O "$1" -- "$2" ;;
             fetch) command fetch -o "$1" -- "$2" ;;
             ftp) command ftp -o "$1" -- "$2" ;; # Progress meter to stdout.
-            *) missing_utilities "$WGET__IMPLEMENTATION" ;;
+            *) print_missing curl wget fetch ftp ;;
         esac
     } || return
-    set -- curl wget fetch ftp
+    WGET__IMPLEMENTATION=$1 && util= && set -- curl wget fetch ftp || return
     for util in "$@"; do
         [ "${WGET__IMPLEMENTATION:-"$util"}" = "$util" ] || continue
         if command -v -- "$util" >/dev/null 2>&1; then
             WGET__IMPLEMENTATION=$util
             return
+        else
+            [ "$WGET__IMPLEMENTATION" = "$util" ] || continue
+            print_missing "$util"
+            return
         fi
     done
-    WGET__IMPLEMENTATION= || return
-    ! is_option_set "$PROBE_MISSING" || missing_utilities "$@"
+    print_missing "$@"
 }
 
 # Copied verbatim from https://unix.stackexchange.com/a/464963.
@@ -454,21 +486,36 @@ read1() { # arg: <variable-name>
 }
 
 # Copied from https://stackoverflow.com/a/3352015.
+# The POSIX character classes are not supported in posh and pdksh:
+# https://manpages.debian.org/testing/posh/posh.1.en.html#File_Name_Patterns
+# https://linux.die.net/man/1/pdksh
 trim() { # arg: [name]
-    var=$1 || return
-    # Remove leading whitespace characters.
-    var=${var#"${var%%[![:space:]]*}"}
-    # Remove trailing whitespace characters.
-    var=${var%"${var##*[![:space:]]}"}
-    printf '%s' "$var"
+    var=$1 &&
+        # Remove leading whitespace characters.
+        var=${var#"${var%%[![:space:]]*}"} &&
+        # Remove trailing whitespace characters.
+        var=${var%"${var##*[![:space:]]}"} &&
+        printf '%s' "$var"
 }
 
 # https://kb.mozillazine.org/Profile_folder_-_Firefox#Files
 # https://searchfox.org/mozilla-central/source/toolkit/profile/nsProfileLock.cpp
 arkenfox_check_firefox_profile_lock() { # arg: DIRECTORY
     lock_file=${1%/}/.parentlock || return
-    while [ -f "$lock_file" ] && fuser_ "$lock_file" ||
-        arkenfox_is_firefox_profile_symlink_locked "$1"; do
+    [ -e "$lock_file" ] || {
+        print_error "Failed to find the .parentlock file under $1."
+        return "${_EX_NOINPUT:?}"
+    }
+    # This way of writing the while loop ensures the proper exit status
+    # is returned to the caller function.
+    while :; do
+        fuser_ "$lock_file" ||
+            arkenfox_is_firefox_profile_symlink_locked "$1" || {
+            # An exit status of _EX__BASE indicates that the user wishes to
+            # proceed with the program.
+            [ "$?" -eq "${_EX__BASE:?}" ] || return
+            break
+        }
         print_warning 'This Firefox profile seems to be in use.' \
             'Close Firefox and try again.'
         print_info '\nPress any key to continue. '
@@ -478,18 +525,22 @@ arkenfox_check_firefox_profile_lock() { # arg: DIRECTORY
 }
 
 arkenfox_is_firefox_profile_symlink_locked() { # arg: DIRECTORY
-    if [ "$(uname)" = 'Darwin' ]; then         # macOS
-        symlink_lock=${1%/}/.parentlock
-    else
-        symlink_lock=${1%/}/lock
-    fi &&
-        [ -L "$symlink_lock" ] &&
-        symlink_lock_target=$(realpath_ "$symlink_lock") ||
+    kernel=$(uname) &&
+        if [ "$kernel" = 'Darwin' ]; then # macOS
+            symlink_lock=${1%/}/.parentlock
+        else
+            symlink_lock=${1%/}/lock
+        fi ||
         return
-    lock_signature=$(
-        basename -- "$symlink_lock_target" |
-            sed -n 's/^\(.*\):+\{0,1\}\([0123456789]\{1,\}\)$/\1:\2/p'
-    ) &&
+    [ -L "$symlink_lock" ] || {
+        print_error "$symlink_lock is not a symbolic link!"
+        return "${_EX_DATAERR:?}"
+    }
+    symlink_lock_target=$(realpath_ "$symlink_lock") &&
+        lock_signature=$(
+            basename -- "$symlink_lock_target" |
+                sed -n 's/^\(.*\):+\{0,1\}\([0123456789]\{1,\}\)$/\1:\2/p'
+        ) &&
         [ -n "$lock_signature" ] &&
         lock_acquired_ip=${lock_signature%:*} &&
         lock_acquired_pid=${lock_signature##*:} || {
@@ -500,8 +551,10 @@ arkenfox_is_firefox_profile_symlink_locked() { # arg: DIRECTORY
     if [ "$lock_acquired_ip" = '127.0.0.1' ]; then
         kill -s 0 "$lock_acquired_pid" 2>/dev/null
     else
-        print_warning 'Unable to determine if the Firefox profile is being used.'
+        print_warning 'Unable to determine if the Firefox profile' \
+            'is being used or not.'
         print_yN 'Proceed anyway?'
+        REPLY= || return
         read1 REPLY
         print_info '\n\n'
         [ "$REPLY" = 'Y' ] || [ "$REPLY" = 'y' ] || return "${_EX_OK:?}"
@@ -509,11 +562,107 @@ arkenfox_is_firefox_profile_symlink_locked() { # arg: DIRECTORY
     fi
 }
 
+# https://kb.mozillazine.org/Profiles.ini_file
+arkenfox_select_firefox_profile_path() {
+    kernel=$(uname) || return
+    if [ "$kernel" = 'Darwin' ]; then # macOS
+        profiles_ini=$HOME/Library/Application\ Support/Firefox/profiles.ini
+    else
+        profiles_ini=$HOME/.mozilla/firefox/profiles.ini
+    fi &&
+        [ -f "$profiles_ini" ] || {
+        print_error 'Failed to find the Firefox profiles.ini file' \
+            'at the standard location.'
+        return "${_EX_NOINPUT:?}"
+    }
+    selected_profile=$(arkenfox_select_firefox_profile "$profiles_ini") &&
+        path=$(
+            printf '%s\n' "$selected_profile" | sed -n 's/^Path=\(.*\)$/\1/p'
+        ) &&
+        is_relative=$(
+            printf '%s\n' "$selected_profile" |
+                sed -n 's/^IsRelative=\([01]\)$/\1/p'
+        ) ||
+        return
+    [ -n "$path" ] && [ -n "$is_relative" ] || {
+        print_error 'Failed to get the value of the Path or IsRelative key' \
+            'from the selected Firefox profile section.'
+        return "${_EX_DATAERR:?}"
+    }
+    if [ "$is_relative" = 1 ]; then
+        dir_name=$(dirname -- "$profiles_ini") &&
+            path=${dir_name%/}/$path || {
+            print_error 'Failed to convert the selected Firefox profile path' \
+                'from relative to absolute.'
+            return "${_EX_DATAERR:?}"
+        }
+    fi
+    printf '%s\n' "$path"
+}
+
+arkenfox_select_firefox_profile() { # arg: profiles.ini
+    while :; do
+        # Adapted from https://unix.stackexchange.com/a/786827.
+        profiles=$(
+            # Character classes and range expressions are locale-dependent:
+            # https://unix.stackexchange.com/a/654391.
+            awk -- '/^[[]/ { section = substr($0, 1) }
+                    (section ~ /^[[]Profile[0123456789]+[]]$/) { print }' "$1"
+        ) &&
+            profile_count=$(
+                printf '%s' "$profiles" |
+                    grep -Ec '^[[]Profile[0123456789]+[]]$'
+            ) &&
+            is_integer "$profile_count" && [ "$profile_count" -gt 0 ] || {
+            print_error 'Failed to find the profile sections in the INI file.'
+            return "${_EX_DATAERR:?}"
+        }
+        if [ "$profile_count" -eq 1 ]; then
+            printf '%s\n' "$profiles"
+            return
+        else
+            display_profiles=$(
+                printf '%s\n\n' "$profiles" |
+                    grep -Ev -e '^IsRelative=' -e '^Default=' &&
+                    awk -- '/^[[]/ { section = substr($0, 2) }
+                            ((section ~ /^Install/) && /^Default=/) { print }' \
+                        "$1"
+            ) || return
+            cat >&2 <<EOF
+Profiles found:
+––––––––––––––––––––––––––––––
+$display_profiles
+––––––––––––––––––––––––––––––
+EOF
+            print_info 'Select the profile number' \
+                '(0 for Profile0, 1 for Profile1, etc; q to quit): '
+            read -r REPLY || return
+            print_info '\n'
+            if is_integer "$REPLY" && [ "$REPLY" -ge 0 ]; then
+                selected_profile=$(
+                    printf '%s\n' "$profiles" |
+                        awk -v select="$REPLY" \
+                            'BEGIN { regex = "^[[]Profile"select"[]]$" }
+                                     /^[[]/ { section = substr($0, 1) }
+                                     section ~ regex { print }'
+                ) &&
+                    [ -n "$selected_profile" ] &&
+                    printf '%s\n' "$selected_profile" &&
+                    return ||
+                    print_warning "Invalid profile number: $REPLY."
+            elif [ "$REPLY" = 'Q' ] || [ "$REPLY" = 'q' ]; then
+                return "${_EX_FAIL:?}"
+            else
+                print_warning 'Invalid input: not a whole number.'
+            fi
+        fi
+    done
+}
+
 arkenfox_script_version() { # arg: {updater.sh|prefsCleaner.sh}
     version_format='[0123456789]\{1,\}\.[0123456789]\{1,\}' &&
         version=$(
-            sed -n -- "5s/.*version:[[:blank:]]*\($version_format\).*/\1/p" \
-                "$1"
+            sed -n -- "5s/.*version:[[:blank:]]*\($version_format\).*/\1/p" "$1"
         ) &&
         [ -n "$version" ] &&
         printf '%s\n' "$version" || {
@@ -523,53 +672,52 @@ arkenfox_script_version() { # arg: {updater.sh|prefsCleaner.sh}
 }
 
 # Restore the starting sh options.
-eval "$_ARKENFOX_STARTING_SHOPTS" || return 2>/dev/null || exit
+eval "$_ARKENFOX_STARTING_SHOPTS" &&
+    # The above command fails to restore the errexit shell option in oksh.
+    # Related: https://unix.stackexchange.com/q/523098.
+    # Workaround for oksh:
+    case $_ARKENFOX_STARTING_SHOPTS in
+        *'set -o errexit'*) set -o errexit ;;
+        *'set +o errexit'*) set +o errexit ;;
+    esac ||
+    return 2>/dev/null || exit
 
 ###############################################################################
 ####              === prefsCleaner.sh specific functions ===               ####
 ###############################################################################
 
 # Detect spoofing by external, readonly functions.
-set -e || return 2>/dev/null || exit
+set -o errexit || return 2>/dev/null || exit
 
 arkenfox_prefs_cleaner_init() {
-    # Variable assignments before a function might actually persist
-    # after the completion of the function, which they do in both ksh and zsh:
-    # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_09_01.
-    probe_missing=$PROBE_MISSING &&
-        probe_terminal &&
-        PROBE_MISSING=0 probe_wget_ &&
-        PROBE_MISSING=0 probe_mktemp_ &&
-        PROBE_MISSING=$probe_missing probe_fuser_ &&
-        probe_realpath_ ||
-        return
+    probe_terminal && probe_realpath_ "$REALPATH__IMPLEMENTATION" || return
     # IMPORTANT! ARKENFOX_PREFS_CLEANER_NAME must be synced to the name of this file!
     # This is so that we may somewhat determine if the script is sourced or not
     # by comparing it to the basename of the canonical path of $0,
-    # which should be better than hard coding all the names of the
-    # interactive and non-interactive POSIX shells in existence.
+    # which should be better than hard coding all the names of
+    # the interactive and non-interactive POSIX shells in existence.
     # Cf. https://stackoverflow.com/a/28776166.
-    ARKENFOX_PREFS_CLEANER_NAME=${ARKENFOX_PREFS_CLEANER_NAME:-prefsCleaner.sh}
-    run_path=$(realpath_ "$0") &&
-        run_dir=$(dirname -- "$run_path") &&
-        run_name=$(basename -- "$run_path") || {
+    ARKENFOX_PREFS_CLEANER_NAME=${ARKENFOX_PREFS_CLEANER_NAME:-prefsCleaner.sh} || return
+    path=$(realpath_ "$0") &&
+        dir_name=$(dirname -- "$path") &&
+        base_name=$(basename -- "$path") || {
         print_error 'Failed to resolve the run file path.'
         return "${_EX_UNAVAILABLE:?}"
     }
     (
-        _ARKENFOX_PREFS_CLEANER_RUN_PATH=$run_path &&
-            _ARKENFOX_PREFS_CLEANER_RUN_DIR=$run_dir &&
-            _ARKENFOX_PREFS_CLEANER_RUN_NAME=$run_name
+        _ARKENFOX_PREFS_CLEANER_RUN_PATH=$path &&
+            _ARKENFOX_PREFS_CLEANER_RUN_DIR=$dir_name &&
+            _ARKENFOX_PREFS_CLEANER_RUN_NAME=$base_name
     ) 2>/dev/null &&
-        _ARKENFOX_PREFS_CLEANER_RUN_PATH=$run_path &&
-        _ARKENFOX_PREFS_CLEANER_RUN_DIR=$run_dir &&
-        _ARKENFOX_PREFS_CLEANER_RUN_NAME=$run_name &&
+        _ARKENFOX_PREFS_CLEANER_RUN_PATH=$path &&
+        _ARKENFOX_PREFS_CLEANER_RUN_DIR=$dir_name &&
+        _ARKENFOX_PREFS_CLEANER_RUN_NAME=$base_name &&
         readonly _ARKENFOX_PREFS_CLEANER_RUN_PATH \
             _ARKENFOX_PREFS_CLEANER_RUN_DIR \
             _ARKENFOX_PREFS_CLEANER_RUN_NAME || {
-        [ "$_ARKENFOX_PREFS_CLEANER_RUN_PATH" = "$run_path" ] &&
-            [ "$_ARKENFOX_PREFS_CLEANER_RUN_DIR" = "$run_dir" ] &&
-            [ "$_ARKENFOX_PREFS_CLEANER_RUN_NAME" = "$run_name" ] || {
+        [ "$_ARKENFOX_PREFS_CLEANER_RUN_PATH" = "$path" ] &&
+            [ "$_ARKENFOX_PREFS_CLEANER_RUN_DIR" = "$dir_name" ] &&
+            [ "$_ARKENFOX_PREFS_CLEANER_RUN_NAME" = "$base_name" ] || {
             print_error 'Failed to make the resolved run file path readonly.' \
                 'Try again in a new shell environment?'
             return "${_EX_TEMPFAIL:?}"
@@ -579,45 +727,46 @@ arkenfox_prefs_cleaner_init() {
 
 arkenfox_prefs_cleaner() { # args: [options]
     arkenfox_prefs_cleaner_parse_options "$@" &&
-        arkenfox_prefs_cleaner_set_profile_path &&
-        arkenfox_prefs_cleaner_check_nonroot || return
-    is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE" ||
-        arkenfox_prefs_cleaner_update_self "$@" || return
-    arkenfox_prefs_cleaner_banner
-    if is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTION_S_START"; then
-        arkenfox_prefs_cleaner_start || return
-    else
-        print_info 'In order to proceed, select a command below' \
-            'by entering its corresponding number.\n\n'
-        while print_info '1) Start\n2) Help\n3) Exit\n'; do
-            while print_info '#? ' && read -r REPLY; do
-                case $REPLY in
-                    1)
-                        arkenfox_prefs_cleaner_start
-                        return
-                        ;;
-                    2)
-                        arkenfox_prefs_cleaner_usage
-                        arkenfox_prefs_cleaner_help
-                        return
-                        ;;
-                    3) return ;;
-                    '') break ;;
-                    *) : ;;
-                esac
+        arkenfox_prefs_cleaner_check_nonroot &&
+        arkenfox_prefs_cleaner_update_self "$@" &&
+        arkenfox_prefs_cleaner_banner &&
+        if is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTION_S_START"; then
+            arkenfox_prefs_cleaner_start
+        else
+            print_info 'In order to proceed, select a command below' \
+                'by entering its corresponding number.\n\n'
+            while print_info '1) Start\n2) Help\n3) Exit\n'; do
+                while print_info '#? ' && read -r REPLY || return; do
+                    case $REPLY in
+                        1)
+                            arkenfox_prefs_cleaner_start
+                            return
+                            ;;
+                        2)
+                            arkenfox_prefs_cleaner_usage
+                            arkenfox_prefs_cleaner_help
+                            return
+                            ;;
+                        3) return ;;
+                        '') break ;;
+                        *) : ;;
+                    esac
+                done
             done
-        done
-    fi
+        fi
 }
 
 arkenfox_prefs_cleaner_usage() {
     cat >&2 <<EOF
 
-Usage: $ARKENFOX_PREFS_CLEANER_NAME [-ds]
+Usage: ${ARKENFOX_PREFS_CLEANER_NAME:?} [-dsl] [-p PROFILE]
 
 Options:
-    -s           Start immediately.
     -d           Don't auto-update prefsCleaner.sh.
+    -s           Start immediately.
+    -p PROFILE   Path to your Firefox profile (if different than the dir of this script).
+                 IMPORTANT: If the path contains spaces, wrap the entire argument in quotes.
+    -l           Choose your Firefox profile from a list.
 
 EOF
 }
@@ -627,29 +776,36 @@ arkenfox_prefs_cleaner_parse_options() { # args: [options]
     OPTIND=1 &&
         # IMPORTANT! Make sure to initialize all options!
         _ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE= &&
-        _ARKENFOX_PREFS_CLEANER_OPTION_S_START= ||
+        _ARKENFOX_PREFS_CLEANER_OPTION_S_START= &&
+        _ARKENFOX_PREFS_CLEANER_OPTION_P_PROFILE_PATH= &&
+        _ARKENFOX_PREFS_CLEANER_OPTION_L_LIST_FIREFOX_PROFILES= ||
         return
-    while getopts 'sd' opt; do
+    while getopts 'dsp:l' opt; do
         case $opt in
-            s) _ARKENFOX_PREFS_CLEANER_OPTION_S_START=1 ;;
             d) _ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE=1 ;;
+            s) _ARKENFOX_PREFS_CLEANER_OPTION_S_START=1 ;;
+            p) _ARKENFOX_PREFS_CLEANER_OPTION_P_PROFILE_PATH=$OPTARG ;;
+            l) _ARKENFOX_PREFS_CLEANER_OPTION_L_LIST_FIREFOX_PROFILES=1 ;;
             \?)
                 arkenfox_prefs_cleaner_usage
                 return "${_EX_USAGE:?}"
                 ;;
+            :) return "${_EX_USAGE:?}" ;;
         esac
     done
-    if [ -z "$MKTEMP__IMPLEMENTATION" ] || [ -z "$WGET__IMPLEMENTATION" ]; then
-        is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE" ||
-            print_warning 'Unable to find curl or wget on your system.' \
-                'Automatic self-update disabled!'
-        _ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE=1
-    fi
 }
 
 arkenfox_prefs_cleaner_set_profile_path() {
-    _ARKENFOX_PROFILE_PATH=$(realpath_ "$_ARKENFOX_PREFS_CLEANER_RUN_DIR") &&
-        [ -w "$_ARKENFOX_PROFILE_PATH" ] &&
+    if [ -n "$_ARKENFOX_PREFS_CLEANER_OPTION_P_PROFILE_PATH" ]; then
+        _ARKENFOX_PROFILE_PATH=$_ARKENFOX_PREFS_CLEANER_OPTION_P_PROFILE_PATH
+    elif is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTION_L_LIST_FIREFOX_PROFILES"; then
+        _ARKENFOX_PROFILE_PATH=$(arkenfox_select_firefox_profile_path)
+    else
+        _ARKENFOX_PROFILE_PATH=${_ARKENFOX_PREFS_CLEANER_RUN_DIR:?}
+    fi &&
+        _ARKENFOX_PROFILE_PATH=$(realpath_ "$_ARKENFOX_PROFILE_PATH") ||
+        return
+    [ -w "$_ARKENFOX_PROFILE_PATH" ] &&
         cd -- "$_ARKENFOX_PROFILE_PATH" || {
         print_error 'The path to your Firefox profile' \
             "('$_ARKENFOX_PROFILE_PATH') failed to be a directory to which" \
@@ -662,6 +818,9 @@ arkenfox_prefs_cleaner_set_profile_path() {
 }
 
 arkenfox_prefs_cleaner_check_nonroot() {
+    kernel=$(uname) || return
+    # Haiku is a single-user operating system.
+    [ "$kernel" != 'Haiku' ] || return "${_EX_OK:?}"
     uid=$(id -u) || return
     if is_integer "$uid" && [ "$uid" -eq 0 ]; then
         print_error "You shouldn't run this with elevated privileges" \
@@ -671,40 +830,49 @@ arkenfox_prefs_cleaner_check_nonroot() {
 }
 
 arkenfox_prefs_cleaner_update_self() { # args: [options]
-    # Here, we use _ARKENFOX_PROFILE_PATH/ARKENFOX_PREFS_CLEANER_NAME
-    # instead of _ARKENFOX_PREFS_CLEANER_RUN_PATH as the latter would be
-    # incorrect if the script is sourced.
-    [ -e "${_ARKENFOX_PREFS_CLEANER_RUN_PATH:?}" ] &&
-        arkenfox_prefs_cleaner=$_ARKENFOX_PREFS_CLEANER_RUN_PATH &&
-        master_prefs_cleaner=$(
+    is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE" &&
+        return "${_EX_OK:?}" || {
+        probe_mktemp_ "$MKTEMP__IMPLEMENTATION" &&
+            probe_wget_ "$WGET__IMPLEMENTATION" || {
+            print_warning 'Probed download feature is absent.' \
+                'Automatic self-update disabled!'
+            return "${_EX_OK:?}"
+        }
+    }
+    prefs_cleaner=${_ARKENFOX_PREFS_CLEANER_RUN_PATH:?} &&
+        downloaded_prefs_cleaner=$(
             download_file \
                 'https://raw.githubusercontent.com/arkenfox/user.js/master/prefsCleaner.sh'
-        ) &&
-        local_version=$(arkenfox_script_version "$arkenfox_prefs_cleaner") &&
-        master_version=$(arkenfox_script_version "$master_prefs_cleaner") ||
+        ) ||
         return
-    local_major_version=${local_version%%.*} &&
-        local_minor_version=${local_version#*.} &&
-        master_major_version=${master_version%%.*} &&
-        master_minor_version=${master_version#*.} &&
+    local_version=$(arkenfox_script_version "$prefs_cleaner") &&
+        downloaded_version=$(
+            arkenfox_script_version "$downloaded_prefs_cleaner"
+        ) &&
+        local_major_version=${local_version%%.*} &&
         is_integer "$local_major_version" &&
+        local_minor_version=${local_version#*.} &&
         is_integer "$local_minor_version" &&
-        is_integer "$master_major_version" &&
-        is_integer "$master_minor_version" || {
-        print_error 'Failed to parse the major and minor parts' \
-            'of the version strings.'
+        downloaded_major_version=${downloaded_version%%.*} &&
+        is_integer "$downloaded_major_version" &&
+        downloaded_minor_version=${downloaded_version#*.} &&
+        is_integer "$downloaded_minor_version" || {
+        print_error 'Failed to obtain valid version parts for comparison.'
         return "${_EX_DATAERR:?}"
     }
-    if [ "$local_major_version" -eq "$master_major_version" ] &&
-        [ "$local_minor_version" -lt "$master_minor_version" ] ||
-        [ "$local_major_version" -lt "$master_major_version" ]; then
-        mv -f -- "$master_prefs_cleaner" "$arkenfox_prefs_cleaner" &&
-            chmod -- u+rx "$arkenfox_prefs_cleaner" || {
+    if [ "$local_major_version" -eq "$downloaded_major_version" ] &&
+        [ "$local_minor_version" -lt "$downloaded_minor_version" ] ||
+        [ "$local_major_version" -lt "$downloaded_major_version" ]; then
+        # Suppress diagnostic message on FreeBSD/DragonFly
+        # (mv: set owner/group: Operation not permitted).
+        mv -f -- "$downloaded_prefs_cleaner" \
+            "$prefs_cleaner" 2>/dev/null &&
+            chmod -- u+rx "$prefs_cleaner" || {
             print_error 'Failed to update the arkenfox prefs.js cleaner' \
                 'and make it executable.'
             return "${_EX_CANTCREAT:?}"
         }
-        "$arkenfox_prefs_cleaner" -d "$@"
+        "$prefs_cleaner" -d "$@"
     fi
 }
 
@@ -716,7 +884,7 @@ arkenfox_prefs_cleaner_banner() {
                    ╔══════════════════════════╗
                    ║     prefs.js cleaner     ║
                    ║    by claustromaniac     ║
-                   ║           v2.2           ║
+                   ║           v3.0           ║
                    ╚══════════════════════════╝
 
 This script should be run from your Firefox profile directory.
@@ -748,6 +916,11 @@ EOF
 }
 
 arkenfox_prefs_cleaner_start() {
+    probe_mktemp_ "$MKTEMP__IMPLEMENTATION" &&
+        probe_wget_ "$WGET__IMPLEMENTATION" &&
+        probe_fuser_ "$FUSER__IMPLEMENTATION" &&
+        arkenfox_prefs_cleaner_set_profile_path ||
+        return
     [ -f "${_ARKENFOX_PROFILE_USERJS:?}" ] &&
         [ -f "${_ARKENFOX_PROFILE_PREFSJS:?}" ] || {
         print_error 'Failed to find both user.js and prefs.js' \
@@ -758,21 +931,20 @@ arkenfox_prefs_cleaner_start() {
         backup_dir=${_ARKENFOX_PROFILE_PREFSJS_BACKUP_DIR:?} &&
         prefsjs_backup=$backup_dir/prefs.js.backup.$(date +"%Y-%m-%d_%H%M") ||
         return
+    # Add the -p option so that mkdir does not return a >0 exit status
+    # if any of the specified directories already exists.
     mkdir -p -- "$backup_dir" &&
-        cp -- "${_ARKENFOX_PROFILE_PREFSJS:?}" "$prefsjs_backup" || {
-        print_error "Failed to backup prefs.js: $prefsjs_backup."
+        cp -f -- "${_ARKENFOX_PROFILE_PREFSJS:?}" "$prefsjs_backup" || {
+        print_error "Failed to backup prefs.js: $_ARKENFOX_PROFILE_PREFSJS."
         return "${_EX_CANTCREAT:?}"
     }
     print_ok "Your prefs.js has been backed up: $prefsjs_backup."
     print_info 'Cleaning prefs.js...\n\n'
-    arkenfox_prefs_cleaner_clean "$prefsjs_backup" || {
-        status=$?
-        return
-    }
+    arkenfox_prefs_cleaner_clean "$prefsjs_backup" || return
     print_ok 'All done!'
 }
 
-# TODO: Check logic and do more testing.
+# FIXME: SunOS/OpenBSD's grep do not recognize - as stdin.
 arkenfox_prefs_cleaner_clean() { # arg: prefs.js
     prefs_regex="user_pref[[:blank:]]*\([[:blank:]]*[\"']([^\"']+)[\"'][[:blank:]]*," &&
         all_userjs_prefs=$(
@@ -790,23 +962,32 @@ arkenfox_prefs_cleaner_clean() { # arg: prefs.js
         # It is not an error if there are no unneeded prefs to clean.
         [ "$?" -eq "${_EX_FAIL:?}" ] || return
     if [ -n "$unneeded_prefs" ]; then
-        prefsjs_temp=$(mktemp_) &&
+        temp=$(mktemp_) &&
             printf '%s\n' "$unneeded_prefs" |
-            grep -v -f - -- "$1" >|"$prefsjs_temp" &&
-            mv -f -- "$prefsjs_temp" "${_ARKENFOX_PROFILE_PREFSJS:?}"
+            grep -v -f - -- "$1" >|"$temp" &&
+            # Suppress diagnostic message on FreeBSD/DragonFly
+            # (mv: set owner/group: Operation not permitted).
+            mv -f -- "$temp" "${_ARKENFOX_PROFILE_PREFSJS:?}" 2>/dev/null
     fi
 }
 
 # Restore the starting sh options.
 eval "$_ARKENFOX_STARTING_SHOPTS" || return 2>/dev/null || exit
+# The above command fails to restore the errexit shell option in oksh.
+# Related: https://unix.stackexchange.com/q/523098.
+# Workaround for oksh:
+case $_ARKENFOX_STARTING_SHOPTS in
+    *'set -o errexit'*) set -o errexit ;;
+    *'set +o errexit'*) set +o errexit ;;
+esac
 
 # "Command appears to be unreachable. Check usage (or ignore if invoked indirectly)."
 # shellcheck disable=SC2317
-(main() { :; }) && true # For quick navigation in IDEs only.
+(main() { :; }) && : # For quick navigation in IDEs only.
 init && arkenfox_prefs_cleaner_init
-init_status=$? &&
-    if [ "$init_status" -eq 0 ]; then
-        if [ "$_ARKENFOX_PREFS_CLEANER_RUN_NAME" = "$ARKENFOX_PREFS_CLEANER_NAME" ]; then
+status=$? &&
+    if [ "$status" -eq 0 ]; then
+        if [ "${_ARKENFOX_PREFS_CLEANER_RUN_NAME:?}" = "${ARKENFOX_PREFS_CLEANER_NAME:?}" ]; then
             arkenfox_prefs_cleaner "$@"
         else
             print_ok 'The prefs.js cleaner script has been successfully sourced.'
@@ -816,8 +997,8 @@ init_status=$? &&
                 'ARKENFOX_PREFS_CLEANER_NAME to match the new name.' \
                 "
 
-         Detected name of the run file: $_ARKENFOX_PREFS_CLEANER_RUN_NAME
-         ARKENFOX_PREFS_CLEANER_NAME  : $ARKENFOX_PREFS_CLEANER_NAME
+         Detected name of the run file: ${_ARKENFOX_PREFS_CLEANER_RUN_NAME:?}
+         ARKENFOX_PREFS_CLEANER_NAME  : ${ARKENFOX_PREFS_CLEANER_NAME:?}
 " \
                 "$(printf '%s\n\b' '')Please note that this is not" \
                 'the expected way to run the prefs.js cleaner script.' \
@@ -828,6 +1009,6 @@ init_status=$? &&
             eval 'arkenfox_prefs_cleaner_update_self() { :; }'
         fi
     else
-        # '&& true' to avoid exiting the shell if the shell option errexit is set.
-        (exit "$init_status") && true
+        # '&& :' to avoid exiting the shell if the shell option errexit is set.
+        (exit "$status") && :
     fi
