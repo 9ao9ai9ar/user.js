@@ -7,18 +7,21 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest] # TODO Add macos-latest and windows-latest
-        shell: [bash, dash, zsh, yash, mksh] # TODO Add ash, hush, osh, pbosh, posh, ksh88, ksh93u+(m)
+        shell: [bash, dash, zsh, yash, mksh, ksh93u+m] # TODO Add ash, hush, osh, pbosh, posh, ksh88
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install esoteric shell
-        if: ${{ contains(fromJSON('["zsh", "yash", "mksh"]'), matrix.shell) }}
+        if: ${{ contains(fromJSON('["zsh", "yash", "mksh", "ksh93u+m"]'), matrix.shell) }}
         run: |
           sudo apt update -y
           sudo apt install ${{ matrix.shell }} -y
       - name: Set shell
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: sudo ln -sf /usr/bin/${{ matrix.shell }} /bin/sh
+      - name: Set ksh93u+m shell
+        if: ${{ matrix.shell == 'ksh93u+m' }}
+        run: sudo ln -sf /usr/bin/ksh /bin/sh
       - name: Check exit status definitions
         run: |
           . ./updater.sh 2>/dev/null
