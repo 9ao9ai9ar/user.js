@@ -7,12 +7,12 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest] # TODO Add macos-latest and windows-latest
-        shell: [bash, dash, zsh, yash]
+        shell: [bash, dash, zsh, yash, mksh] # TODO Add ash, hush, osh, pbosh, posh, ksh88, ksh93u+(m)
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install esoteric shell
-        if: ${{ contains(fromJSON('["zsh", "yash"]'), matrix.shell) }}
+        if: ${{ contains(fromJSON('["zsh", "yash", "mksh"]'), matrix.shell) }}
         run: |
           sudo apt update -y
           sudo apt install ${{ matrix.shell }} -y
