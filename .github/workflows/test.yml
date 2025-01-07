@@ -49,7 +49,6 @@ jobs:
       - name: Check that passing a wrong option returns EX_USAGE
         run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
       - name: Check that --help returns EX_OK and not EX__BASE
-        if: ${{ false }}   # TODO Fix this
         run: ./updater.sh -h > /dev/null
       - name: Check that if the profile doesn't have at least d-wx permissions, returns EX_UNAVAILABLE
         run: |
