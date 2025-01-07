@@ -41,36 +41,37 @@ jobs:
           done <<EOF
           $(exit_status_definitions)
           EOF
-      - name: Check that running as root returns EX_USAGE
-        run: sudo ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
       - name: Tests setup
         run: |
           set +e
+          . ./updater.sh && exit_status_definitions >> $GITHUB_ENV
+      - name: Check that running as root returns EX_USAGE
+        run: sudo ./updater.sh -x 2>/dev/null || { [ "$?" -eq $_EX_USAGE ] && exit 0; }
       - name: Check that passing a wrong option returns EX_USAGE
-        run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
+        run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq $_EX_USAGE ] && exit 0; }
       - name: Check that --help returns EX_OK and not EX__BASE
         run: ./updater.sh -h > /dev/null
       - name: Check that if the profile doesn't have at least d-wx permissions, returns EX_UNAVAILABLE
         run: |
           unxable_temp_dir=$(mktemp -d)
           chmod 444 $unxable_temp_dir
-          ./updater.sh -p $unxable_temp_dir > /dev/null 2>&1 || { [ "$?" -ne 69 ] && exit 1; }
+          ./updater.sh -p $unxable_temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_UNAVAILABLE ] && exit 1; }
           unwable_temp_dir=$(mktemp -d)
           chmod 111 $unwable_temp_dir
-          ./updater.sh -p $unwable_temp_dir > /dev/null 2>&1 || { [ "$?" -ne 69 ] && exit 1; }
+          ./updater.sh -p $unwable_temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_UNAVAILABLE ] && exit 1; }
           exit 0
       - name: Check that if the profiles.ini doesn't exist, returns EX_NOINPUT
         run: |
           temp_dir=$(mktemp -d)
           chmod 777 $temp_dir
-          ./updater.sh -l > /dev/null 2>&1 || { [ "$?" -ne 66 ] && exit 1; }
+          ./updater.sh -l > /dev/null 2>&1 || { [ "$?" -ne $_EX_NOINPUT ] && exit 1; }
           exit 0
       - name: Check that if the profile requires root privileges, returns EX_CONFIG
         run: |
           temp_dir=$(mktemp -d)
           sudo chmod 777 $temp_dir
           sudo touch $temp_dir/user.js
-          ./updater.sh -p $temp_dir > /dev/null 2>&1 || { [ "$?" -ne 78 ] && exit 1; }
+          ./updater.sh -p $temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_CONFIG ] && exit 1; }
           exit 0
       - name: Check that the profile gets updated
         if: ${{ false }}   # TODO Complete this test
