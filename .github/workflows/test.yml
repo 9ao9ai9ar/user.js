@@ -17,7 +17,7 @@ jobs:
           sudo apt update -y
           sudo apt install ${{ matrix.shell }} -y
       - name: Set shell
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+        if: ${{ matrix.os == 'ubuntu-latest' && !contains(fromJSON('["ksh93u+m"]'), matrix.shell) }}
         run: sudo ln -sf /usr/bin/${{ matrix.shell }} /bin/sh
       - name: Set ksh93u+m shell
         if: ${{ matrix.shell == 'ksh93u+m' }}
