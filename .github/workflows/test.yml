@@ -42,7 +42,7 @@ jobs:
           $(exit_status_definitions)
           EOF
       - name: Check that running as root returns EX_USAGE
-        run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
+        run: sudo ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
       - name: Tests setup
         run: |
           set +e
