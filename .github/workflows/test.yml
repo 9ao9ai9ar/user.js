@@ -74,10 +74,8 @@ jobs:
           ./updater.sh -p $temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_CONFIG ] && exit 1; }
           exit 0
       - name: Check that the profile gets updated
-        if: ${{ false }}   # TODO Complete this test
         run: |
           temp_dir=$(mktemp -d)
           touch $temp_dir/user.js
-          mkdir $temp_dir/userjs_test
-          chown -R nonrootuser:nonrootuser $temp_dir
-          ./updater.sh -p $temp_dir
+          yes | ./updater.sh -p $temp_dir
+          diff user.js $temp_dir/user.js
