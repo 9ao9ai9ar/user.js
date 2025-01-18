@@ -1021,6 +1021,7 @@ arkenfox_prefs_cleaner_start() {
     print_ok 'All done!'
 }
 
+# TODO: Check that the differing behavior from the old fClean function is OK.
 arkenfox_prefs_cleaner_clean() { # args: file
     format="user_pref[[:blank:]]*\([[:blank:]]*[\"']([^\"']+)[\"'][[:blank:]]*," &&
         # SunOS/OpenBSD's grep do not recognize - as stdin,
@@ -1032,14 +1033,14 @@ arkenfox_prefs_cleaner_clean() { # args: file
             sort |
             uniq >|"$prefs_in_userjs" ||
         return
-    grep -E -f "$prefs_in_userjs" -- "$1" |
+    grep -F -f "$prefs_in_userjs" -- "$1" |
         grep -E -e "^[[:blank:]]*$format" >|"$prefs_to_clean" ||
         # It is not an error if there are no prefs to clean.
         [ "$?" -eq "${_EX_FAIL:?}" ] ||
         return
     if [ -s "$prefs_to_clean" ]; then # File size is greater than zero.
         temp=$(mktemp_) &&
-            grep -v -f "$prefs_to_clean" -- "$1" >|"$temp" &&
+            grep -F -v -f "$prefs_to_clean" -- "$1" >|"$temp" &&
             # Suppress diagnostic message on FreeBSD/DragonFly
             # (mv: set owner/group: Operation not permitted).
             mv -f -- "$temp" "${_ARKENFOX_PROFILE_PREFSJS:?}" 2>/dev/null
