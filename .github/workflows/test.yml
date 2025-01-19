@@ -70,9 +70,16 @@ jobs:
           sudo touch $temp_dir/user.js
           ./updater.sh -p $temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_CONFIG ] && exit 1; }
           exit 0
-      - name: Check that the profile gets updated
+      - name: Check that the profile contains something after execution
         run: |
           temp_dir=$(mktemp -d)
           touch $temp_dir/user.js
           yes | ./updater.sh -p $temp_dir
+          [ -s $temp_dir/user.js ] || exit 1
+      - name: Check that the profile contains the most recent user.js after execution
+        run: |
+          temp_dir=$(mktemp -d)
+          touch $temp_dir/user.js
+          yes | ./updater.sh -p $temp_dir
+          wget -qO user.js https://raw.githubusercontent.com/arkenfox/user.js/refs/heads/master/user.js
           diff user.js $temp_dir/user.js
