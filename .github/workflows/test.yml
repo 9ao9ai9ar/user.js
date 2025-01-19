@@ -7,13 +7,18 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest] # TODO Add macos-latest and windows-latest
-        shell: [bash, dash] # TODO Add zsh, yash...
+        shell: [bash, busybox, dash, ksh, mksh, yash, zsh] # TODO Add ksh88, osh, pbosh, posh
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install esoteric shell
+        if: ${{ contains(fromJSON('["busybox", "ksh", "mksh", "yash", "zsh"]'), matrix.shell) }}
+        run: |
+          sudo apt update -y
+          sudo apt install ${{ matrix.shell }} -y
       - name: Set shell
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: ln -sf /usr/bin/${{ matrix.shell }} /bin/sh
+        run: sudo ln -sf /usr/bin/${{ matrix.shell }} /bin/sh
       - name: Check exit status definitions
         run: |
           . ./updater.sh 2>/dev/null
@@ -33,56 +38,46 @@ jobs:
           done <<EOF
           $(exit_status_definitions)
           EOF
-      - name: Check that running as root returns EX_USAGE
-        run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq 2 ] && exit 0; }
       - name: Tests setup
         run: |
-          useradd -m nonrootuser
-          echo 'ALL ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-          echo 'shopt -s expand_aliases' >> $HOME/.bash_aliases
-          echo "alias nonsudo='sudo -u nonrootuser sh -c'" >> $HOME/.bash_aliases
           set +e
+          . ./updater.sh && exit_status_definitions >> $GITHUB_ENV
+      - name: Check that running as root returns EX_USAGE
+        run: sudo ./updater.sh -x 2>/dev/null || { [ "$?" -eq $_EX_USAGE ] && exit 0; }
       - name: Check that passing a wrong option returns EX_USAGE
-        run: |
-          . $HOME/.bash_aliases
-          nonsudo "./updater.sh -x 2>/dev/null" || { [ "$?" -eq 2 ] && exit 0; }
+        run: ./updater.sh -x 2>/dev/null || { [ "$?" -eq $_EX_USAGE ] && exit 0; }
       - name: Check that --help returns EX_OK and not EX__BASE
-        if: ${{ false }}   # TODO Fix this
-        run: |
-          . $HOME/.bash_aliases
-          nonsudo "./updater.sh -h > /dev/null"
+        run: ./updater.sh -h > /dev/null
       - name: Check that if the profile doesn't have at least d-wx permissions, returns EX_UNAVAILABLE
         run: |
-          . $HOME/.bash_aliases
           unxable_temp_dir=$(mktemp -d)
           chmod 444 $unxable_temp_dir
-          nonsudo "./updater.sh -p $unxable_temp_dir > /dev/null 2>&1" || { [ "$?" -ne 69 ] && exit 1; }
+          ./updater.sh -p $unxable_temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_UNAVAILABLE ] && exit 1; }
           unwable_temp_dir=$(mktemp -d)
           chmod 111 $unwable_temp_dir
-          nonsudo "./updater.sh -p $unwable_temp_dir > /dev/null 2>&1" || { [ "$?" -ne 69 ] && exit 1; }
+          ./updater.sh -p $unwable_temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_UNAVAILABLE ] && exit 1; }
           exit 0
       - name: Check that if the profiles.ini doesn't exist, returns EX_NOINPUT
         run: |
-          . $HOME/.bash_aliases
           temp_dir=$(mktemp -d)
           chmod 777 $temp_dir
-          nonsudo "./updater.sh -l > /dev/null 2>&1" || { [ "$?" -ne 66 ] && exit 1; }
+          ./updater.sh -l > /dev/null 2>&1 || { [ "$?" -ne $_EX_NOINPUT ] && exit 1; }
           exit 0
       - name: Check that if the profile requires root privileges, returns EX_CONFIG
         run: |
-          . $HOME/.bash_aliases
           temp_dir=$(mktemp -d)
-          chmod 777 $temp_dir
-          touch $temp_dir/user.js
-          mkdir $temp_dir/userjs_test
-          nonsudo "./updater.sh -p $temp_dir > /dev/null 2>&1" || { [ "$?" -ne 78 ] && exit 1; }
+          sudo chmod 777 $temp_dir
+          sudo touch $temp_dir/user.js
+          ./updater.sh -p $temp_dir > /dev/null 2>&1 || { [ "$?" -ne $_EX_CONFIG ] && exit 1; }
           exit 0
-      - name: Check that the profile gets updated
-        if: ${{ false }}   # TODO Complete this test
+      - name: Check that the profile contains something after execution
         run: |
-          . $HOME/.bash_aliases
           temp_dir=$(mktemp -d)
+          echo "temp_dir=$temp_dir" >> $GITHUB_ENV
           touch $temp_dir/user.js
-          mkdir $temp_dir/userjs_test
-          chown -R nonrootuser:nonrootuser $temp_dir
-          nonsudo "./updater.sh -p $temp_dir"
+          yes | ./updater.sh -p $temp_dir
+          [ -s $temp_dir/user.js ] || exit 1
+      - name: Check that the profile contains the most recent user.js after execution
+        run: |
+          wget -qO user.js https://raw.githubusercontent.com/arkenfox/user.js/refs/heads/master/user.js
+          diff user.js $temp_dir/user.js
