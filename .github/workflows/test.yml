@@ -7,7 +7,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest] # TODO Add macos-latest and windows-latest
-        shell: [bash, dash, zsh, yash, mksh, ksh93u+m] # TODO Add ash, hush, osh, pbosh, posh, ksh88
+        shell: [bash, dash, zsh, yash, mksh, ksh93u+m] # TODO Add ash, osh, pbosh, posh, ksh88
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
