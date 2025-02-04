@@ -565,7 +565,8 @@ read1() { # args: name
 }
 
 # https://searchfox.org/mozilla-central/source/modules/libpref/parser/src/lib.rs
-# TODO: Handle Python style comments, the third form of comments allowed in user.js.
+# user.js supports C, C++ and Python style comments.
+# Currently, only the first two forms of comments are handled in this function.
 arkenfox_remove_userjs_comments() { # args: file
     # Copied in full from the public domain sed script at
     # https://sed.sourceforge.io/grabbag/scripts/remccoms3.sed,

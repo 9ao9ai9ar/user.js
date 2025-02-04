@@ -1021,7 +1021,6 @@ arkenfox_prefs_cleaner_start() {
     print_ok 'All done!'
 }
 
-# TODO: Check that the differing behavior from the old fClean function is OK.
 arkenfox_prefs_cleaner_clean() { # args: file
     format="user_pref[[:blank:]]*\([[:blank:]]*[\"']([^\"']+)[\"'][[:blank:]]*," &&
         # SunOS/OpenBSD's grep do not recognize - as stdin,
