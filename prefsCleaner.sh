@@ -803,7 +803,6 @@ arkenfox_prefs_cleaner() { # args: [option ...]
     arkenfox_prefs_cleaner_parse_options "$@" &&
         arkenfox_prefs_cleaner_check_nonroot &&
         arkenfox_prefs_cleaner_update_self "$@" &&
-        arkenfox_prefs_cleaner_banner &&
         if is_option_set \
             "${_ARKENFOX_PREFS_CLEANER_OPTION_S_START_IMMEDIATELY?}"; then
             arkenfox_prefs_cleaner_start
@@ -1003,6 +1002,7 @@ arkenfox_prefs_cleaner_start() {
             "in the profile path: ${_ARKENFOX_PROFILE_PATH:?}."
         return "${_EX_NOINPUT:?}"
     }
+    arkenfox_prefs_cleaner_banner
     arkenfox_check_firefox_profile_lock "${_ARKENFOX_PROFILE_PATH:?}" &&
         backup=${_ARKENFOX_PROFILE_PREFSJS_BACKUP_DIR:?} &&
         backup=${backup%/}/prefs.js.backup.$(date +"%Y-%m-%d_%H%M") ||
