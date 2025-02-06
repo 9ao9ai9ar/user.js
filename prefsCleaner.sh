@@ -9,7 +9,7 @@
 # This restriction is set by the function arkenfox_script_version.
 
 # Example advanced script usage:
-# $ yes | env WGET__IMPLEMENTATION=wget ./prefsCleaner.sh >/dev/null 2>&1
+# $ yes | tr -d '\n' | env WGET__IMPLEMENTATION=wget ./prefsCleaner.sh 2>/dev/null
 # $ TERM=dumb . ./prefsCleaner.sh && arkenfox_prefs_cleaner
 
 # This ShellCheck warning is just noise for those who know what they are doing:
