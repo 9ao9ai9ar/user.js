@@ -76,7 +76,7 @@ esac && {
             # required in order to properly save and restore alias definitions.
             (\command alias -p >/dev/null 2>&1) &&
                 _STARTING_ALIASES=$(\command alias -p) ||
-                _STARTING_ALIASES=$(\command alias)
+                _STARTING_ALIASES=
         } &&
             \command unalias -a
     else
@@ -182,6 +182,11 @@ init() {
         GREP_COLOR='0' &&
         GREP_OPTIONS= &&
         export LC_ALL GREP_COLORS GREP_COLOR GREP_OPTIONS && {
+        path=$(command -p getconf PATH 2>/dev/null) &&
+            PATH="$path:$PATH" &&
+            export PATH ||
+            test "$?" -eq 127 # getconf: command not found (Haiku).
+    } && {
         # The pipefail option was added in POSIX.1-2024 (SUSv5),
         # and has long been supported by most major POSIX-compatible shells,
         # with the notable exceptions of dash and ksh88-based shells.
@@ -191,14 +196,12 @@ init() {
             command set -o pipefail ||
             : Do without.
     } && {
-        # Bare unset will produce an error in XPG4 sh.
-        command unset -f '[' 2>/dev/null ||
-            command -V '[' | { ! command -p grep -q function; }
-    } && {
-        path=$(command -p getconf PATH 2>/dev/null) &&
-            PATH="$path:$PATH" &&
-            export PATH ||
-            [ "$?" -eq 127 ] # getconf: command not found (Haiku).
+        # In XPG4 sh, `unset -f '['` is an error.
+        # In bash 3, `command` always exits the shell on failure
+        # when errexit is on, even if guarded by AND/OR lists.
+        (unset -f '[') 2>/dev/null &&
+            unset -f '[' 2>/dev/null ||
+            command -V '[' | { ! grep -q function; }
     } &&
         IFS=$(printf '%b' ' \n\t') &&
         umask 0077 && # cp/mv need execute access to parent directories.
@@ -412,6 +415,7 @@ probe_realpath_() {
                 case ${REALPATH__IMPLEMENTATION?} in
                     realpath) command realpath -- "$1" ;;
                     readlink) command readlink -f -- "$1" ;;
+                    grealpath) command grealpath -- "$1" ;;
                     greadlink) command greadlink -f -- "$1" ;;
                     *) readlinkf "$1" ;;
                 esac
@@ -439,8 +443,8 @@ probe_realpath_() {
     # and does not name a file in the current directory.
     name=$(uname) &&
         case $name in
-            NetBSD) : ;;      # NetBSD realpath works as intended.
-            *BSD | DragonFly) # Other BSDs should use readlinkf.
+            NetBSD) : ;;               # NetBSD realpath works as intended.
+            Darwin | *BSD | DragonFly) # Other BSDs and macOS should use readlinkf.
                 REALPATH__IMPLEMENTATION=${REALPATH__IMPLEMENTATION:-readlinkf}
                 ;;
         esac ||
@@ -565,7 +569,7 @@ read1() { # args: name
 # https://searchfox.org/mozilla-central/source/toolkit/profile/nsProfileLock.cpp
 arkenfox_check_firefox_profile_lock() { # args: directory
     flock_file=${1%/}/.parentlock || return
-    [ -e "$flock_file" ] || {
+    [ -e "$flock_file" ] || [ -L "$flock_file" ] || {
         print_error "Failed to find the .parentlock file under $1."
         return "${_EX_NOINPUT:?}"
     }
@@ -800,8 +804,16 @@ arkenfox_prefs_cleaner_init() {
 }
 
 arkenfox_prefs_cleaner() { # args: [option ...]
-    arkenfox_prefs_cleaner_parse_options "$@" &&
-        arkenfox_prefs_cleaner_check_nonroot &&
+    arkenfox_prefs_cleaner_parse_options "$@" || return
+    arkenfox_prefs_cleaner_exec_general_options || {
+        status_=$? || return
+        # An exit status of _EX__BASE indicates that a command tied to
+        # a general option has been executed successfully.
+        [ "$status_" -eq "${_EX__BASE:?}" ] &&
+            return "${_EX_OK:?}" ||
+            return "$status_"
+    }
+    arkenfox_prefs_cleaner_check_nonroot &&
         arkenfox_prefs_cleaner_update_self "$@" &&
         if is_option_set \
             "${_ARKENFOX_PREFS_CLEANER_OPTION_S_START_IMMEDIATELY?}"; then
@@ -833,9 +845,10 @@ arkenfox_prefs_cleaner() { # args: [option ...]
 arkenfox_prefs_cleaner_usage() {
     cat >&2 <<EOF
 
-Usage: ${ARKENFOX_PREFS_CLEANER_NAME:?} [-dsl] [-p PROFILE]
+Usage: ${ARKENFOX_PREFS_CLEANER_NAME:?} [-hdsl] [-p PROFILE]
 
 Options:
+    -h           Show this help message and exit.
     -d           Don't auto-update prefsCleaner.sh.
     -s           Start immediately.
     -p PROFILE   Path to your Firefox profile (if different from the containing directory of this script).
@@ -849,13 +862,23 @@ arkenfox_prefs_cleaner_parse_options() { # args: [option ...]
     name= &&
         # OPTIND must be manually reset between multiple calls to getopts.
         OPTIND=1 &&
+        _ARKENFOX_PREFS_CLEANER_OPTIONS_DISJOINT=0 &&
+        _ARKENFOX_PREFS_CLEANER_OPTION_H_HELP= &&
         _ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE= &&
         _ARKENFOX_PREFS_CLEANER_OPTION_S_START_IMMEDIATELY= &&
         _ARKENFOX_PREFS_CLEANER_OPTION_P_PROFILE_PATH= &&
         _ARKENFOX_PREFS_CLEANER_OPTION_L_LIST_PROFILES= ||
         return
-    while getopts 'dsp:l' name; do
+    while getopts 'hdsp:l' name; do
+        ! is_option_set "$_ARKENFOX_PREFS_CLEANER_OPTIONS_DISJOINT" || {
+            arkenfox_prefs_cleaner_usage
+            return "${_EX_USAGE:?}"
+        }
         case $name in
+            h)
+                _ARKENFOX_PREFS_CLEANER_OPTION_H_HELP=1
+                _ARKENFOX_PREFS_CLEANER_OPTIONS_DISJOINT=1
+                ;;
             d) _ARKENFOX_PREFS_CLEANER_OPTION_D_DONT_UPDATE=1 ;;
             s) _ARKENFOX_PREFS_CLEANER_OPTION_S_START_IMMEDIATELY=1 ;;
             p) _ARKENFOX_PREFS_CLEANER_OPTION_P_PROFILE_PATH=$OPTARG ;;
@@ -867,6 +890,25 @@ arkenfox_prefs_cleaner_parse_options() { # args: [option ...]
             :) return "${_EX_USAGE:?}" ;;
         esac
     done
+}
+
+arkenfox_prefs_cleaner_exec_general_options() {
+    if is_option_set "${_ARKENFOX_PREFS_CLEANER_OPTION_H_HELP?}"; then
+        arkenfox_prefs_cleaner_usage 2>&1
+    else
+        return "${_EX_OK:?}"
+    fi
+    # We want to return from the caller function as well
+    # if a command tied to a general option is executed.
+    # To achieve that, we translate an exit status of _EX_OK to _EX__BASE
+    # and handle the retranslation back to its original exit status
+    # in the caller function.
+    status_=$? || return
+    if [ "$status_" -eq "${_EX_OK:?}" ]; then
+        return "${_EX__BASE:?}"
+    else
+        return "$status_"
+    fi
 }
 
 arkenfox_prefs_cleaner_set_profile_path() {

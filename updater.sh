@@ -76,7 +76,7 @@ esac && {
             # required in order to properly save and restore alias definitions.
             (\command alias -p >/dev/null 2>&1) &&
                 _STARTING_ALIASES=$(\command alias -p) ||
-                _STARTING_ALIASES=$(\command alias)
+                _STARTING_ALIASES=
         } &&
             \command unalias -a
     else
@@ -182,6 +182,11 @@ init() {
         GREP_COLOR='0' &&
         GREP_OPTIONS= &&
         export LC_ALL GREP_COLORS GREP_COLOR GREP_OPTIONS && {
+        path=$(command -p getconf PATH 2>/dev/null) &&
+            PATH="$path:$PATH" &&
+            export PATH ||
+            test "$?" -eq 127 # getconf: command not found (Haiku).
+    } && {
         # The pipefail option was added in POSIX.1-2024 (SUSv5),
         # and has long been supported by most major POSIX-compatible shells,
         # with the notable exceptions of dash and ksh88-based shells.
@@ -191,14 +196,12 @@ init() {
             command set -o pipefail ||
             : Do without.
     } && {
-        # Bare unset will produce an error in XPG4 sh.
-        command unset -f '[' 2>/dev/null ||
-            command -V '[' | { ! command -p grep -q function; }
-    } && {
-        path=$(command -p getconf PATH 2>/dev/null) &&
-            PATH="$path:$PATH" &&
-            export PATH ||
-            [ "$?" -eq 127 ] # getconf: command not found (Haiku).
+        # In XPG4 sh, `unset -f '['` is an error.
+        # In bash 3, `command` always exits the shell on failure
+        # when errexit is on, even if guarded by AND/OR lists.
+        (unset -f '[') 2>/dev/null &&
+            unset -f '[' 2>/dev/null ||
+            command -V '[' | { ! grep -q function; }
     } &&
         IFS=$(printf '%b' ' \n\t') &&
         umask 0077 && # cp/mv need execute access to parent directories.
@@ -415,6 +418,7 @@ probe_realpath_() {
                 case ${REALPATH__IMPLEMENTATION?} in
                     realpath) command realpath -- "$1" ;;
                     readlink) command readlink -f -- "$1" ;;
+                    grealpath) command grealpath -- "$1" ;;
                     greadlink) command greadlink -f -- "$1" ;;
                     *) readlinkf "$1" ;;
                 esac
@@ -442,8 +446,8 @@ probe_realpath_() {
     # and does not name a file in the current directory.
     name=$(uname) &&
         case $name in
-            NetBSD) : ;;      # NetBSD realpath works as intended.
-            *BSD | DragonFly) # Other BSDs should use readlinkf.
+            NetBSD) : ;;               # NetBSD realpath works as intended.
+            Darwin | *BSD | DragonFly) # Other BSDs and macOS should use readlinkf.
                 REALPATH__IMPLEMENTATION=${REALPATH__IMPLEMENTATION:-readlinkf}
                 ;;
         esac ||
